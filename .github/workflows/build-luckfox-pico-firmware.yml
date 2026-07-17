@@ -1,0 +1,202 @@
+name: 构建 Luckfox Pico 固件
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - dev
+    paths-ignore:
+      - '**.md'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-image:
+    name: 🐳 构建 CI 镜像
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      image: ${{ steps.build.outputs.image }}
+    steps:
+      - name: 📤 检出仓库
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: 🔐 登录 GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 🐳 构建/复用镜像并输出 digest
+        id: build
+        shell: bash
+        run: |
+          set -euo pipefail
+          OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          IMAGE_REF="ghcr.io/${OWNER}/luckfox-pico-ci"
+          TAG=$(sha256sum .cursor/Dockerfile | cut -c1-32)
+          echo "镜像标签（Dockerfile 内容 hash）= ${TAG}"
+          if docker buildx imagetools inspect "${IMAGE_REF}:${TAG}" >/dev/null 2>&1; then
+            echo "✅ ${IMAGE_REF}:${TAG} 已存在，复用（不 rebuild）"
+          else
+            echo "🔨 构建并推送 ${IMAGE_REF}:${TAG}"
+            docker build -f .cursor/Dockerfile -t "${IMAGE_REF}:${TAG}" .cursor
+            docker push "${IMAGE_REF}:${TAG}"
+          fi
+          DIGEST=$(docker buildx imagetools inspect "${IMAGE_REF}:${TAG}" --format '{{json .Manifest.Digest}}' | xargs)
+          echo "镜像 digest = ${DIGEST}"
+          echo "image=${IMAGE_REF}@${DIGEST}" >> "$GITHUB_OUTPUT"
+
+  build-firmware:
+    name: 🛠️ ${{ matrix.title }}
+    needs: build-image
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
+    permissions:
+      contents: read
+      packages: read
+    env:
+      BUILDROOT_VER: buildroot-2023.02.6
+    container:
+      image: ${{ needs.build-image.outputs.image }}
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - title: Luckfox Pico Max · SD_CARD
+            os: ubuntu-24.04
+            board: pro_max
+            medium: sd_card
+            hw: '4'
+            media: '0'
+            br_defconfig: luckfox_pico_defconfig
+            required_extra: sd_update.img
+          - title: Luckfox Pico Max · SPI_NAND
+            os: ubuntu-24.04
+            board: pro_max
+            medium: spi_nand
+            hw: '4'
+            media: '1'
+            br_defconfig: luckfox_pico_defconfig
+            required_extra: oem.img
+          - title: Luckfox Pico Ultra W · EMMC
+            os: ubuntu-24.04
+            board: ultra
+            medium: emmc
+            hw: '5'
+            media: '0'
+            br_defconfig: luckfox_pico_w_defconfig
+            required_extra: oem.img
+    steps:
+      - name: 📤 检出仓库
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: 🌳 设置 buildroot 下载目录（容器内 $GITHUB_WORKSPACE 下）
+        run: echo "BR2_DL_DIR=$GITHUB_WORKSPACE/.br-dl" >> "$GITHUB_ENV"
+
+      - name: 🔑 计算 buildroot 下载缓存 key
+        id: dlkey
+        shell: bash
+        run: |
+          set -euo pipefail
+          VER="${BUILDROOT_VER}"
+          DEFCONFIG_PATH="sysdrv/tools/board/buildroot/${{ matrix.br_defconfig }}"
+          H=$(sha256sum "${DEFCONFIG_PATH}" | cut -c1-16)
+          echo "key=br-dl-${VER}-${{ matrix.br_defconfig }}-${H}" >> "$GITHUB_OUTPUT"
+
+      - name: 💾 buildroot 下载缓存
+        uses: actions/cache@v6
+        with:
+          path: .br-dl
+          key: ${{ steps.dlkey.outputs.key }}
+          restore-keys: |
+            br-dl-${{ env.BUILDROOT_VER }}-${{ matrix.br_defconfig }}-
+
+      - name: 🖥️ 磁盘空间（编译前）
+        if: always()
+        run: df -h || true
+
+      - name: 🎯 选板（非交互 lunch）
+        run: printf '%s\n%s\n0\n' '${{ matrix.hw }}' '${{ matrix.media }}' | ./build.sh lunch
+
+      - name: 🩺 依赖自检（信息性、不阻断）
+        run: ./build.sh check || true
+
+      - name: ℹ️ 构建信息
+        run: ./build.sh info || true
+
+      - name: 🛠️ 全量编译（allsave）
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "${BR2_DL_DIR}"
+          ( while true; do echo "===== df / @ $(date -u +%H:%M:%S) ====="; df -h / | tail -1 || true; sleep 60; done ) &
+          MON=$!
+          set +e
+          ./build.sh
+          RC=$?
+          set -e
+          kill "${MON}" 2>/dev/null || true
+          exit "${RC}"
+
+      - name: 🖥️ 磁盘空间（编译后）
+        if: always()
+        run: df -h || true
+
+      - name: 📏 产物清单与体积
+        if: always()
+        shell: bash
+        run: |
+          ls -lh output/image/ || true
+          du -sh output/image/ IMAGE/ 2>/dev/null || true
+          du -sh "${BR2_DL_DIR}" 2>/dev/null || true
+
+      - name: ✅ 校验必需镜像齐全
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd output/image
+          for f in update.img boot.img uboot.img env.img rootfs.img idblock.img download.bin userdata.img '${{ matrix.required_extra }}'; do
+            if [ -s "${f}" ]; then
+              echo "✅ ${f}"
+            else
+              echo "❌ 缺少必需产物: ${f}"; exit 1
+            fi
+          done
+          cd "${GITHUB_WORKSPACE}"
+          n=$(find IMAGE -maxdepth 2 -path '*_RELEASE_TEST/build_info.txt' | wc -l)
+          if [ "${n}" -ne 1 ]; then
+            echo "❌ 期望恰有 1 个 build_info.txt，实际 ${n}"; exit 1
+          fi
+          echo "✅ build_info.txt 数量正确 (${n})"
+
+      - name: 🔐 生成 SHA256 校验和
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd output/image
+          mapfile -t files < <(find . -maxdepth 1 -type f ! -name 'SHA256SUMS' ! -name '.*' -printf '%P\n' | sort)
+          sha256sum -- "${files[@]}" > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: 📦 上传固件产物
+        uses: actions/upload-artifact@v7
+        with:
+          name: luckfox-pico-firmware_${{ matrix.board }}-${{ matrix.medium }}_on-${{ matrix.os }}
+          if-no-files-found: error
+          path: |
+            output/image/
+            IMAGE/*_RELEASE_TEST/build_info.txt
