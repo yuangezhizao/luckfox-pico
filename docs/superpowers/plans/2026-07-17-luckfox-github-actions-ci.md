@@ -122,6 +122,8 @@ jobs:
       - name: 📤 检出仓库
         uses: actions/checkout@v7
         with:
+          # 已清理孤立 gitlink（见本提交），checkout 不再对其 submodule foreach → 无 exit 128；
+          # 故可安全启用 persist-credentials:false（构建期不在 .git 留存短期 GITHUB_TOKEN，纵深防御）
           persist-credentials: false
 
       - name: 🔐 登录 GHCR
@@ -233,6 +235,8 @@ git commit -m "ci(github-actions): 👷 加 build-image job（docker build→GHC
       - name: 📤 检出仓库
         uses: actions/checkout@v7
         with:
+          # 已清理孤立 gitlink（见本提交），checkout 不再对其 submodule foreach → 无 exit 128；
+          # 故可安全启用 persist-credentials:false（构建期不在 .git 留存短期 GITHUB_TOKEN，纵深防御）
           persist-credentials: false
 
       - name: 🌳 设置 buildroot 下载目录（容器内 $GITHUB_WORKSPACE 下）
@@ -272,7 +276,7 @@ git commit -m "ci(github-actions): 👷 加 build-image job（docker build→GHC
 
 设计要点：
 - `container.image` 用 Task 2 的 digest 输出；`credentials` 拉镜像（兼容 public/private、与触发分支无关；`luckfox-pico-ci` 包当前为 public，credentials 保留以兼容两种可见性）。
-- **两个 job 的 `checkout` 均设 `persist-credentials: false`**：checkout 后 `build-image`（`docker build`/push）与 `build-firmware`（`./build.sh` 联网下载大量 buildroot 包）都无需认证的 git 操作，禁用凭据持久化可避免长时构建期把短期 `GITHUB_TOKEN` 留存进 `.git/config`，纵深防御、零副作用。
+- **两个 job 的 `checkout` 用 `persist-credentials: false` + 已清理孤立 gitlink（两全）**：`persist-credentials: false` 是官方推荐的纵深防御（构建期不在 `.git` 留存短期 `GITHUB_TOKEN`）。首次 `push(dev)`（run 29896916823）实测它与孤立 gitlink `sysdrv/tools/board/ubuntu` 冲突（`false` 使凭据清理提前进主 checkout 步骤、对该 gitlink `git submodule foreach` 报 `exit 128`、升级为 `error` 致失败）；本 PR **`git rm --cached` 根治该 gitlink**（官方遗留死条目、无 url、编译不用）→ checkout 不再 foreach → 无 128 → 保留 `false` 加固。既消 128 又留加固、两全（本仓 `build.sh` 无远端认证 git 操作、加固边际风险本就低，详见 spec §4.2 与 §7 R7）。
 - `matrix` 用 `hw`/`media` 两个独立数字字段，`printf '%s\n%s\n0\n'` 拼选板三选（第三项系统恒 `0`=Buildroot），**避免** YAML 双引号对 `\n` 转义的坑。
 - **`BR2_DL_DIR` 用容器内路径 `$GITHUB_WORKSPACE/.br-dl`（经 `GITHUB_ENV` 设置，非 `${{ github.workspace }}`）**：容器 job 里 `${{ github.workspace }}` 求值为宿主路径 `/home/runner/work/…`、`$GITHUB_WORKSPACE` 才是容器内挂载点 `/__w/…`（官方 actions/runner#2058、checkout#785），故用后者；`actions/cache` 的 `path` 用相对 `.br-dl`（相对 `GITHUB_WORKSPACE` 解析、与之同指一处）。放 buildroot **树外**的原因：`sysdrv/Makefile` 的 `buildroot` 目标以 `test -d source/buildroot/buildroot-2023.02.6 || 解包` 判定，若缓存 in-tree `dl/` 会预建版本目录→跳过解包→源码缺失；放树外则 `actions/cache` 既命中又不破坏解包。buildroot 以环境变量 `BR2_DL_DIR` 为最高优先级下载目录（全仓未设该变量，默认 `dl/`，故环境变量可覆盖）。
 - 缓存 key 含 `BUILDROOT_VER` + defconfig 名 + defconfig **内容 hash**：内容变更即失效；两 Pico Max 同 `luckfox_pico_defconfig` → 同 key → 去重复用（2 套 vs 3 份）。
@@ -534,6 +538,8 @@ jobs:
       - name: 📤 检出仓库
         uses: actions/checkout@v7
         with:
+          # 已清理孤立 gitlink（见本提交），checkout 不再对其 submodule foreach → 无 exit 128；
+          # 故可安全启用 persist-credentials:false（构建期不在 .git 留存短期 GITHUB_TOKEN，纵深防御）
           persist-credentials: false
 
       - name: 🔐 登录 GHCR
@@ -610,6 +616,8 @@ jobs:
       - name: 📤 检出仓库
         uses: actions/checkout@v7
         with:
+          # 已清理孤立 gitlink（见本提交），checkout 不再对其 submodule foreach → 无 exit 128；
+          # 故可安全启用 persist-credentials:false（构建期不在 .git 留存短期 GITHUB_TOKEN，纵深防御）
           persist-credentials: false
 
       - name: 🌳 设置 buildroot 下载目录（容器内 $GITHUB_WORKSPACE 下）
@@ -727,10 +735,22 @@ jobs:
 **Task 完成情况**：
 - Task 1–4：workflow 逐步实现，每步 actionlint + shellcheck 零告警、reviewer Approved。
 - Task 5：临时 bootstrap 首测——GitHub Actions run 29827465865 **三组合全绿**（build-image 2.6min；SPI_NAND 44min / SD_CARD 46min / Ultra W 76min，均 < 120min timeout）。
-- Task 6：移除 bootstrap、回填 spec、plan 入库；其中 **Step 4（爆盘处理）因未爆盘无需执行；Step 2（必需清单）无需收窄**（首测三组合公共文件齐全、SD_CARD 确产 `update.img`），另把 `rootfs.img`/`idblock.img`/`download.bin`/`userdata.img` **4 项作加固扩充**纳入公共清单（公共门禁 **4→8**）——三组合首测均产出并生成 sha256，但这 **4 项的显式 `test -s` 门禁** bootstrap 版均未含、待合并后 `push(dev)` run 验证。
+- Task 6：移除 bootstrap、回填 spec、plan 入库；其中 **Step 4（爆盘处理）因未爆盘无需执行；Step 2（必需清单）无需收窄**（首测三组合公共文件齐全、SD_CARD 确产 `update.img`），另把 `rootfs.img`/`idblock.img`/`download.bin`/`userdata.img` **4 项作加固扩充**纳入公共清单（公共门禁 **4→8**）——三组合首测均产出并生成 sha256，但这 **4 项的显式 `test -s` 门禁** bootstrap 版均未含；现已由 fix 分支 `workflow_dispatch` 端到端预验证通过（含 4→8 门禁全过），合并后的 `push(dev)` 仅作合并态确认。
 
 **首测实测**：container 根盘 `overlay` 实测 145G，Ultra W 峰值 74G/51%、余量 ≥71G，**未爆盘**——B1 容器方案在标准 runner 上无需磁盘释放；产物 zip：Ultra 180MB / SPI_NAND 118MB / SD_CARD 99MB。
 
 **提交整理**：本 PR 原含 22 个分步提交（spec 多轮 review + workflow 分步实现 + 首测回填），最终整理为 **2 个提交**——`ci(github-actions): 👷 …workflow`（保留首次提交时间 2026-07-17）+ `docs(superpowers): …spec 与 plan`（PR 最后一个提交）。本 plan 与 spec 内容即对应第 2 个提交、与最终 workflow 逐字一致。
 
 > 说明：上方各 Task 内的 `git commit` / `git push` 步骤是**实施计划的执行指令**（当时按 SDD 分步落地）；PR 合入前已按「开发 + 文档」两个提交重新整理，故 git 历史为 2 个提交而非逐 Task 提交——这是有意的历史整理，不影响计划内容与最终交付的一致性。
+
+---
+
+## 回归修复（Regression Fix · 2026-07-22）
+
+**触发**：PR #2 合并入 `dev`（merge commit `b28401481`）触发首个**最终版** `push(dev)` run 29896916823——`build-image` 的 checkout 步骤 **失败**（`exit 128`），`build-firmware`（`needs: build-image`）因此未执行、整个 run 失败。
+
+**根因**：收尾 review 阶段给两 job 的 `checkout` 加的 `persist-credentials: false`，与仓库中孤立 gitlink `sysdrv/tools/board/ubuntu`（mode 160000、无 `.gitmodules` 条目）交互——`persist-credentials: false` 使 `actions/checkout` 的凭据清理（`Removing auth`）从 **Post 阶段提前进主 checkout 步骤内**，对该 gitlink 执行 `git submodule foreach` 报 `fatal: No url found for submodule path … exit 128`，由 bootstrap 首测的 Post 阶段**良性 warning 升级为主步骤 `##[error]`**、致步骤失败。bootstrap 首测（run 29827465865）用默认 `persist-credentials: true`、128 落 Post 阶段=warning，故当时三组合全绿、**未暴露此差异**——这正印证了历轮 review 反复提示的「最终合并版与 bootstrap 的差异之一是 `persist-credentials: false`、未经端到端验证」。
+
+**修复（本 PR·根治两全）**：**根治孤立 gitlink + 恢复 `persist-credentials: false`**——`git rm --cached sysdrv/tools/board/ubuntu` 移除官方遗留死条目（无 url、编译不用、Ubuntu 官方已弃），checkout 不再对其 `submodule foreach` → 无 exit 128；两处 checkout 保留 `persist-credentials: false`（纵深防御、不留 token）。同步更新 spec §4.2/§6/§7 R7、plan（设计要点 + 附录 A）。既消除 128、又保住 token 加固，实现两全（升级自最初「移除 false 回避」的方案——趁本 PR 未合并 `dev`、rebase 到 fix 提交内落地）。
+
+**验证**：`gitlink 删 + persist-credentials: false` 是**全新组合**，已按 §4.3 用 `workflow_dispatch` 对本 fix 分支（`cursor/fix-ci-persist-credentials-76b3`）端到端实测全绿——checkout **无 exit 128**（4 job 零 128 annotation）、三组合固件全绿（「所合即所测」，避免又一次「未验证即合并」）。（验证结果表见本 PR 评论；**验证 run** 只引用分支、不写进文档，以免 amend/重跑后对应不上；历史引用的失败 run、merge commit 等不可变事实照常标注。）

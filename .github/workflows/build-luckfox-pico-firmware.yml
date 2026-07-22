@@ -26,6 +26,8 @@ jobs:
       - name: 📤 检出仓库
         uses: actions/checkout@v7
         with:
+          # 已清理孤立 gitlink（见本提交），checkout 不再对其 submodule foreach → 无 exit 128；
+          # 故可安全启用 persist-credentials:false（构建期不在 .git 留存短期 GITHUB_TOKEN，纵深防御）
           persist-credentials: false
 
       - name: 🔐 登录 GHCR
@@ -102,6 +104,8 @@ jobs:
       - name: 📤 检出仓库
         uses: actions/checkout@v7
         with:
+          # 已清理孤立 gitlink（见本提交），checkout 不再对其 submodule foreach → 无 exit 128；
+          # 故可安全启用 persist-credentials:false（构建期不在 .git 留存短期 GITHUB_TOKEN，纵深防御）
           persist-credentials: false
 
       - name: 🌳 设置 buildroot 下载目录（容器内 $GITHUB_WORKSPACE 下）
