@@ -2,6 +2,14 @@ name: 构建 Luckfox Pico 固件
 
 on:
   workflow_dispatch:
+    inputs:
+      force_rebuild:
+        description: 强制重建 CI 镜像（吸收 apt 安全更新，跳过“已存在则复用”）
+        type: boolean
+        default: false
+  schedule:
+    # 北京每月 1 日 08:00（UTC 00:00）自动强制重建 CI 镜像以吸收 apt 安全更新；仅重建镜像、跳过固件编译
+    - cron: '0 0 1 * *'
   push:
     branches:
       - dev
@@ -9,7 +17,9 @@ on:
       - '**.md'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  # group 含 event_name：push / schedule / workflow_dispatch 各自独立并发组，
+  # 避免月度 schedule 重建与 push(dev) 固件构建跨事件互相取消（同事件内仍取消旧 run 省资源）
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event_name }}
   cancel-in-progress: true
 
 jobs:
@@ -40,13 +50,20 @@ jobs:
       - name: 🐳 构建/复用镜像并输出 digest
         id: build
         shell: bash
+        env:
+          # schedule（月度）或手动 force_rebuild 时强制重建，吸收 Dockerfile apt 包的安全更新
+          FORCE_REBUILD: ${{ github.event_name == 'schedule' || inputs.force_rebuild == true }}
         run: |
           set -euo pipefail
           OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
           IMAGE_REF="ghcr.io/${OWNER}/luckfox-pico-ci"
           TAG=$(sha256sum .cursor/Dockerfile | cut -c1-32)
           echo "镜像标签（Dockerfile 内容 hash）= ${TAG}"
-          if docker buildx imagetools inspect "${IMAGE_REF}:${TAG}" >/dev/null 2>&1; then
+          if [ "${FORCE_REBUILD}" = "true" ]; then
+            echo "🔁 强制重建（schedule 月度 / 手动 force_rebuild）：--no-cache 重跑 apt、跳过复用"
+            docker build --no-cache -f .cursor/Dockerfile -t "${IMAGE_REF}:${TAG}" .cursor
+            docker push "${IMAGE_REF}:${TAG}"
+          elif docker buildx imagetools inspect "${IMAGE_REF}:${TAG}" >/dev/null 2>&1; then
             echo "✅ ${IMAGE_REF}:${TAG} 已存在，复用（不 rebuild）"
           else
             echo "🔨 构建并推送 ${IMAGE_REF}:${TAG}"
@@ -60,6 +77,8 @@ jobs:
   build-firmware:
     name: 🛠️ ${{ matrix.title }}
     needs: build-image
+    # schedule（月度）只重建 CI 镜像、跳过固件编译；push(dev)/workflow_dispatch 才跑完整 3 组合
+    if: github.event_name != 'schedule'
     runs-on: ${{ matrix.os }}
     timeout-minutes: 120
     permissions:

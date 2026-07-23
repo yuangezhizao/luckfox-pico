@@ -18,7 +18,7 @@
 - 唯一交付代码文件：`.github/workflows/build-luckfox-pico-firmware.yml`（新建）。
 - 矩阵 3 组合（均 Buildroot）：Pico Max/SD_CARD（`lunch` = `4␊0␊0`）、Pico Max/SPI_NAND（`4␊1␊0`）、Ultra W/EMMC（`5␊0␊0`）。
 - 运行环境：`.cursor/Dockerfile`（`FROM ubuntu:24.04@sha256:4fbb8e6a8395de5a7550b33509421a2bafbc0aab6c06ba2cef9ebffbc7092d90`，无 `COPY`）→ build+push `ghcr.io/<小写owner>/luckfox-pico-ci:<Dockerfile内容hash>` → `container:` 按 **digest**（`ghcr.io/<小写owner>/luckfox-pico-ci@sha256:…`）引用 + `credentials`（`github.actor` + `GITHUB_TOKEN`）拉镜像（兼容 public/private，包当前 public）。
-- 触发：`workflow_dispatch` + `push(dev)` + `paths-ignore`（纯文档）；feature 分支首测用**临时 bootstrap**（把本分支临时加入 `push.branches`，注册/见分晓后移除）。
+- 触发：`workflow_dispatch` + `push(dev)` + `schedule`（每月 1 日 UTC 00:00 强制重建 CI 镜像、仅重建镜像不编译固件，见 spec §4.2）+ `paths-ignore`（纯文档）；feature 分支首测用**临时 bootstrap**（把本分支临时加入 `push.branches`，注册/见分晓后移除）。
 - 权限**按 job 最小化**：`build-image` = `{contents: read, packages: write}`；`build-firmware` = `{contents: read, packages: read}`。
 - 矩阵 `fail-fast: false`；`build-firmware` `timeout-minutes: 120`、`build-image` `timeout-minutes: 30`。
 - 缓存：`BR2_DL_DIR=$GITHUB_WORKSPACE/.br-dl`（容器内挂载卷、buildroot **树外**，经 `GITHUB_ENV` 设置）；`actions/cache` `path: .br-dl`（相对 `GITHUB_WORKSPACE`、与前者同指）、key = `br-dl-buildroot-2023.02.6-<defconfig名>-<defconfig内容hash>` + `restore-keys` 同 defconfig 前缀回退。defconfig 映射：Pico Max（SD_CARD/SPI_NAND）→ `luckfox_pico_defconfig`；Ultra W（EMMC）→ `luckfox_pico_w_defconfig`。
@@ -75,7 +75,8 @@ on:
       - '**.md'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  # group 含 event_name：不同触发事件各自独立并发组、避免跨事件互相取消（同事件内仍取消旧 run 省资源）
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event_name }}
   cancel-in-progress: true
 
 jobs: {}
@@ -514,6 +515,14 @@ name: 构建 Luckfox Pico 固件
 
 on:
   workflow_dispatch:
+    inputs:
+      force_rebuild:
+        description: 强制重建 CI 镜像（吸收 apt 安全更新，跳过“已存在则复用”）
+        type: boolean
+        default: false
+  schedule:
+    # 北京每月 1 日 08:00（UTC 00:00）自动强制重建 CI 镜像以吸收 apt 安全更新；仅重建镜像、跳过固件编译
+    - cron: '0 0 1 * *'
   push:
     branches:
       - dev
@@ -521,7 +530,9 @@ on:
       - '**.md'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  # group 含 event_name：push / schedule / workflow_dispatch 各自独立并发组，
+  # 避免月度 schedule 重建与 push(dev) 固件构建跨事件互相取消（同事件内仍取消旧 run 省资源）
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event_name }}
   cancel-in-progress: true
 
 jobs:
@@ -552,13 +563,20 @@ jobs:
       - name: 🐳 构建/复用镜像并输出 digest
         id: build
         shell: bash
+        env:
+          # schedule（月度）或手动 force_rebuild 时强制重建，吸收 Dockerfile apt 包的安全更新
+          FORCE_REBUILD: ${{ github.event_name == 'schedule' || inputs.force_rebuild == true }}
         run: |
           set -euo pipefail
           OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
           IMAGE_REF="ghcr.io/${OWNER}/luckfox-pico-ci"
           TAG=$(sha256sum .cursor/Dockerfile | cut -c1-32)
           echo "镜像标签（Dockerfile 内容 hash）= ${TAG}"
-          if docker buildx imagetools inspect "${IMAGE_REF}:${TAG}" >/dev/null 2>&1; then
+          if [ "${FORCE_REBUILD}" = "true" ]; then
+            echo "🔁 强制重建（schedule 月度 / 手动 force_rebuild）：--no-cache 重跑 apt、跳过复用"
+            docker build --no-cache -f .cursor/Dockerfile -t "${IMAGE_REF}:${TAG}" .cursor
+            docker push "${IMAGE_REF}:${TAG}"
+          elif docker buildx imagetools inspect "${IMAGE_REF}:${TAG}" >/dev/null 2>&1; then
             echo "✅ ${IMAGE_REF}:${TAG} 已存在，复用（不 rebuild）"
           else
             echo "🔨 构建并推送 ${IMAGE_REF}:${TAG}"
@@ -572,6 +590,8 @@ jobs:
   build-firmware:
     name: 🛠️ ${{ matrix.title }}
     needs: build-image
+    # schedule（月度）只重建 CI 镜像、跳过固件编译；push(dev)/workflow_dispatch 才跑完整 3 组合
+    if: github.event_name != 'schedule'
     runs-on: ${{ matrix.os }}
     timeout-minutes: 120
     permissions:
@@ -754,3 +774,17 @@ jobs:
 **修复（本 PR·根治两全）**：**根治孤立 gitlink + 恢复 `persist-credentials: false`**——`git rm --cached sysdrv/tools/board/ubuntu` 移除官方遗留死条目（无 url、编译不用、Ubuntu 官方已弃），checkout 不再对其 `submodule foreach` → 无 exit 128；两处 checkout 保留 `persist-credentials: false`（纵深防御、不留 token）。同步更新 spec §4.2/§6/§7 R7、plan（设计要点 + 附录 A）。既消除 128、又保住 token 加固，实现两全（升级自最初「移除 false 回避」的方案——趁本 PR 未合并 `dev`、rebase 到 fix 提交内落地）。
 
 **验证**：`gitlink 删 + persist-credentials: false` 是**全新组合**，已按 §4.3 用 `workflow_dispatch` 对本 fix 分支（`cursor/fix-ci-persist-credentials-76b3`）端到端实测全绿——checkout **无 exit 128**（4 job 零 128 annotation）、三组合固件全绿（「所合即所测」，避免又一次「未验证即合并」）。（验证结果表见本 PR 评论；**验证 run** 只引用分支、不写进文档，以免 amend/重跑后对应不上；历史引用的失败 run、merge commit 等不可变事实照常标注。）
+
+---
+
+## 镜像重建机制（apt 安全更新 · 2026-07-23）
+
+**背景**：`build-image` 以 `.cursor/Dockerfile` 内容 hash 为 tag、默认「已存在则复用」，故 Dockerfile 字节不变时其 `RUN apt-get install` 的包不会自动吸收 Ubuntu 24.04 安全补丁（run 29935595371 实测复用同 digest、未 rebuild）。经 brainstorming + grilling 定稿如下方案（当前 PR 一并实现，属 `feat`）。
+
+- **触发**：新增 `workflow_dispatch` 的 `force_rebuild` boolean input（手动按需）+ `schedule: '0 0 1 * *'`（北京每月 1 日 08:00 = UTC 00:00，自动兜底）。
+- **build-image**：`FORCE_REBUILD = (github.event_name=='schedule') || (inputs.force_rebuild==true)`；为真时跳过「已存在则复用」、`docker build --no-cache` 重跑 apt + push（覆盖同 tag、digest 更新，tag 不堆积；旧 digest 变未标记 package version、按需清理即可）。
+- **build-firmware**：`if: github.event_name != 'schedule'`——schedule 只重建镜像、跳过 3 组合固件（每月约 3min）；push(dev)/dispatch 仍跑完整。
+- **base image**：保留 `FROM …@sha256` digest pin（供应链不可变、可审计）；不加 `--pull`（对 pin digest 无实际作用）、不引入 Dependabot（避免每月约 1 条 bump digest 的提交噪音）；base 底层需要时手动 bump digest（低频、经 PR）。
+- **关键澄清**：buildroot 2023.02.6 由 Luckfox SDK 固定、**不在 CI 镜像内**（`build.sh` 编译时下载源码 tarball），不属本机制；本机制只更新 Dockerfile 显式安装的 host 编译工具的安全补丁。
+
+设计依据（强制重建触发、`--no-cache` 重跑 apt、base digest pin 的取舍等）见 spec §4.2「CI 镜像更新」与 §7 R8。

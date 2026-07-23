@@ -46,7 +46,7 @@
 | --- | --- |
 | F1 | 对 3 个组合（Pico Max/SD_CARD、Pico Max/SPI_NAND、Ultra W/EMMC，均 Buildroot）各执行非交互 `lunch` + 全量 `./build.sh`，产出 `output/image/*.img`。 |
 | F2 | CI 编译环境用 `.cursor/Dockerfile`（Ubuntu 24.04）构建的镜像：`docker build` → push GHCR → `build-firmware` 以 `container:` + `credentials`（`GITHUB_TOKEN`）拉取（镜像当前为 **public**，`credentials` 兼容 public/private）。 |
-| F3 | 触发：`workflow_dispatch`（手动）+ `push(dev)`（`paths-ignore` 纯文档）。 |
+| F3 | 触发：`workflow_dispatch`（手动）+ `push(dev)`（`paths-ignore` 纯文档）+ `schedule`（每月 1 日强制重建 CI 镜像、仅重建镜像不编译固件，见 §4.2）。 |
 | F4 | 缓存 buildroot 下载包与 GHCR 镜像，加速后续 run。 |
 | F5 | 产物 artifact 覆盖 `output/image/` 全部**非隐藏**烧录产物（隐藏的 `.env.txt` 为 env 分区配置、非烧录件，不纳入）+ `IMAGE/*_RELEASE_TEST/` 存档（排除 `DEBUG_FILES/` 与重复的 `IMAGES/`，仅留 `build_info.txt` 溯源）；`upload-artifact` 实际启用（本设计新写、启用态）、设 `if-no-files-found: error`（缺产物即失败、不静默）。 |
 | F6 | 编译前后 + 编译中周期采样打印 `df -h`、编译后打印产物清单/体积（`ls -lh` / `du -sh`，观测步骤均加 `if: always()`），并对 `output/image/` 非隐藏产物生成 `sha256`（落 `SHA256SUMS` 文件、随产物上传）；另按介质 `test -s` 断言必需镜像齐全（见 §4.5）。 |
@@ -82,10 +82,11 @@
 - 镜像已含 `git`（Dockerfile 的 apt 安装块已装 `git`），便于容器内常规 git 操作；`checkout` 用常规模式即可——仓库根目录无 `.gitmodules`、无真子模块，编译所需的 lvgl 等均为普通 vendored 目录；仓库曾从官方继承一个与本 3 个 Buildroot 组合无关的**孤立 gitlink**（`sysdrv/tools/board/ubuntu`，mode 160000、无 `.gitmodules` 映射、指向已弃用的 Ubuntu rootfs），常规 checkout 对它仅留空目录、不影响编译——**本 PR 已 `git rm --cached` 清理**（见下）。**⚠️ CI 实测（关键·严重度随 `persist-credentials` 而异）**：`actions/checkout` 的凭据清理步（`Removing auth`）会对该孤立 gitlink 执行 `git submodule foreach`，因无 `.gitmodules` 登记 URL 而报 `fatal: No url found for submodule path 'sysdrv/tools/board/ubuntu' in .gitmodules` → git 退出码 128。**该 128 的严重度取决于 `persist-credentials`**：默认 `persist-credentials: true` 时凭据清理延后到 **Post 阶段**执行、128 仅是**一条良性 `warning` annotation**（每 job 一条，bootstrap 首测 4 条）、**非致命、不阻断**（三组合 run 全绿、artifact 正常）；但设 `persist-credentials: false` 时凭据清理**提前进主 checkout 步骤内**、同一 128 即成 `##[error]` **致 checkout 步骤失败、job 失败**（`dev` 首次 `push(dev)` run 29896916823 的 `build-image` 实测：checkout 完成后紧接 `Removing auth` 的 `submodule foreach` → exit 128 → 步骤失败、后续 matrix job 因 `needs` 未执行）。**本 PR 已 `git rm --cached sysdrv/tools/board/ubuntu` 根治该孤立 gitlink**（它是官方「删 `.gitmodules` 却漏删 gitlink 条目」的遗留死条目：无 url、工作区仅空目录、编译不用、Ubuntu 支持官方早已删除，见 §9 QA）——清理后 checkout 不再对任何 gitlink 执行 `submodule foreach` → **无 128**，故两处 `checkout` **安全启用 `persist-credentials: false`**（构建期不在 `.git` 留存短期 `GITHUB_TOKEN` 的纵深防御），**既消除 128、又保住加固，两全其美**（详见 §7 R7）。
 - Ubuntu 版本用 24.04：`ubuntu-24.04` 为当前 GA 的 `ubuntu-latest`；本仓 `.cursor/Dockerfile` 已实测 24.04 编译成功两板（host gcc13/glibc2.39）——目标固件 ABI 由内置交叉工具链（`arm-rockchip830` uClibc）决定、目标二进制不链接 host glibc，但 buildroot 构建期仍用 host gcc/libc 编译大量 HOSTCC 工具、host 工具链仍是构建依赖（故非跨时间字节可复现，见 N2）。超出官方仅支持的 22.04，但实测可编、风险可控。
 - **首版不加磁盘释放**：见分晓优先（§7 R1）。
+- **CI 镜像更新（吸收 apt 安全补丁）**：`build-image` 的 tag = `.cursor/Dockerfile` 内容 hash、默认「tag 已存在则复用、不 rebuild」，故 Dockerfile 字节不变时其 `RUN apt-get install` 的包（`git`/`gcc`/`openssl`/`openssh` 等）不会自动吸收 Ubuntu 24.04 后续安全补丁。为此加**强制重建机制**：`workflow_dispatch` 的 `force_rebuild` input（手动按需）或 `schedule`（北京每月 1 日 08:00 = UTC `0 0 1 * *`，自动兜底）触发时 `FORCE_REBUILD` 为真 → 跳过复用判断、`docker build --no-cache` 重跑 apt 拿最新 + push（覆盖同 tag、digest 更新，tag 不堆积；旧 digest 变未标记 package version、按需清理即可）；`schedule` 仅重建镜像、`build-firmware` 以 `if: github.event_name != 'schedule'` 跳过固件编译（每月成本约 3min）。base 层由 `FROM …@sha256` digest pin 固定（保供应链不可变、不加 `--pull`、不引入 Dependabot 以免提交噪音），需要时手动 bump digest（低频、经 PR）。详见 §7 R8。
 
 ### 4.3 触发方式（问题 3）
 
-`workflow_dispatch` + `push(dev)` + `paths-ignore`（仅 `**.md`，忽略任意层级的 Markdown 文档——`**` 跨 `/` 故覆盖 `docs/` 子目录下的 spec/plan；`*.md` 只匹配仓库根、不适用），对齐 ESP-Pocket2 习惯；因编译重，纯 Markdown 文档提交不触发全量编。**取舍**：仅忽略 `**.md`，故非 Markdown 的纯文档/配置改动（如 `LICENSE`、`.gitignore` 等）在 `push(dev)` 时仍会触发一次全量编译；鉴于公开仓库净额 $0 且此类提交罕见，接受该取舍（不再扩大 `paths-ignore`，以免误伤真正需要编译的改动）。PR 触发首版不加（3 板全量在 PR 上翻倍消耗，不划算）。
+`workflow_dispatch` + `push(dev)` + `schedule`（月度强制重建 CI 镜像、仅重建镜像不编译固件，见 §4.2）+ `paths-ignore`（仅 `**.md`，忽略任意层级的 Markdown 文档——`**` 跨 `/` 故覆盖 `docs/` 子目录下的 spec/plan；`*.md` 只匹配仓库根、不适用），对齐 ESP-Pocket2 习惯；因编译重，纯 Markdown 文档提交不触发全量编。**取舍**：仅忽略 `**.md`，故非 Markdown 的纯文档/配置改动（如 `LICENSE`、`.gitignore` 等）在 `push(dev)` 时仍会触发一次全量编译；鉴于公开仓库净额 $0 且此类提交罕见，接受该取舍（不再扩大 `paths-ignore`，以免误伤真正需要编译的改动）。PR 触发首版不加（3 板全量在 PR 上翻倍消耗，不划算）。
 
 > **首测注册（bootstrap）**：`workflow_dispatch` 需工作流文件**先存在于默认分支**才能派发（本设计 `push` 仅 `push(dev)`，推 feature 分支既不触发、也不注册）——故合入 `dev` 前，工作流在本 feature 分支「未注册、无从手动派发」，这**并非** GHCR 权限问题（credentials 拉取与分支无关）。**首测策略采用临时 bootstrap**：临时给工作流加一个 feature 分支会触发的事件（如临时把本分支加进 `push.branches`、或加 `pull_request`），推送即在本分支跑起首测、同时完成注册（⚠️ `gh workflow run <file> --ref <feature>` 属 `workflow_dispatch`，需工作流先合入**默认分支**方可派发、合入 `dev` 前不可用，且本环境 `gh` 只读、无法 `workflow run`——首测仅靠上述 push 触发）；**首测「见分晓」通过后移除临时触发**、恢复为 `workflow_dispatch` + `push(dev)` 随 PR 合入 `dev`。
 
@@ -115,7 +116,7 @@
 
 ### 4.7 附加增强（问题 7）
 
-`concurrency` 取消同分支旧 run · 产物 `sha256` 校验和 · `./build.sh info` · 步骤 emoji 命名 · `./build.sh check`（先 `lunch`，作者要求保留：官方推荐的编译前依赖自检，成本仅数秒；**信息性、返回码恒 0、缺依赖仅打印提示不阻断**——非「早失败」门禁，因 CI 镜像已由 `.cursor/Dockerfile` 装齐全部依赖，check 主要作可读日志）。
+`concurrency`（group 按 分支+事件 隔离、取消同组旧 run） · 产物 `sha256` 校验和 · `./build.sh info` · 步骤 emoji 命名 · `./build.sh check`（先 `lunch`，作者要求保留：官方推荐的编译前依赖自检，成本仅数秒；**信息性、返回码恒 0、缺依赖仅打印提示不阻断**——非「早失败」门禁，因 CI 镜像已由 `.cursor/Dockerfile` 装齐全部依赖，check 主要作可读日志）。
 
 ## 5. 编译矩阵（3 组合）
 
@@ -136,7 +137,7 @@
 
   📤 `checkout`（常规，无 `recursive`；`persist-credentials: false`——孤立 gitlink 已清理、无 128，构建期不留 token，见 §7 R7） → 💾 恢复 buildroot `dl` 缓存（`actions/cache`） → 🖥️ `df -h`（编译前） → 🎯 非交互 `lunch` → 🩺 `./build.sh check`（信息性、不阻断） → ℹ️ `./build.sh info` → 🛠️ `./build.sh`（`allsave`；**编译中后台周期 `df -h` 采样**逼近峰值） → 🖥️ `df -h`（编译后，`if: always()`） → 📏 `ls -lh output/image/` + `du -sh output/image/ IMAGE/`（`if: always()` + `|| true` 守卫） → ✅ 按介质 `test -s` 校验必需镜像齐全（公共 + SD 的 `sd_update.img` / SPI_NAND·EMMC 的 `oem.img` + 恰一个 `build_info.txt`；缺则失败） → 🔐 `sha256sum` 对 `output/image/` 非隐藏产物生成 `> output/image/SHA256SUMS`（随产物上传） → 📦 `upload-artifact`（启用，`if-no-files-found: error`，`IMAGE/` 排除 `DEBUG_FILES/` 与重复的 `IMAGES/`）。
 
-- 权限**按 job 最小化**（不在顶层给 write）：`build-image` = `{contents: read, packages: write}`、`build-firmware` = `{contents: read, packages: read}`；`concurrency`（group 含分支名，`cancel-in-progress: true`）。
+- 权限**按 job 最小化**（不在顶层给 write）：`build-image` = `{contents: read, packages: write}`、`build-firmware` = `{contents: read, packages: read}`；`concurrency`（group 含分支名 + 事件名，`cancel-in-progress: true`——按事件隔离，避免 `schedule`/`push`/`workflow_dispatch` 跨事件互相取消，见 §4.7）。
 
 具体 YAML（含 actions 版本、`BR2_DL_DIR` 设置、**完整已小写镜像引用**的 job outputs 传递、`container.credentials` 拉取、缓存 key）在关联 plan 中给出。
 
@@ -151,6 +152,7 @@
 | R5 | **GHCR「currently free」政策可能变化**。 | GitHub 承诺变更前至少 1 个月通知；公开包与 Actions 工作流内 push/pull 带宽长期免费，实际影响极小。 |
 | R6 | **GHCR 个人账号无稳定的「自动 public 化」端点**（组织包 404、用户包多需 PAT classic、官方称无端点）；且 `workflow_dispatch` 需工作流先在默认分支才能派发——本 feature 分支首测前工作流未注册、无从手动派发（**非** GHCR 权限问题）。 | CI 拉取用 `container.credentials`（`GITHUB_TOKEN`）拉镜像（兼容 public/private）、**与触发分支无关**；首测经「临时加宽触发做 bootstrap 注册」在本分支跑（见 §4.3），通过后移除、恢复 `workflow_dispatch`+`push(dev)`；「对外 public 复用」为可选手动、非 CI 依赖。 |
 | R7 | **`persist-credentials: false` 曾与孤立 gitlink 交互致 checkout 失败（本 PR 已根治）**：收尾曾给两 job 的 `checkout` 加 `persist-credentials: false`（不在构建期 `.git` 留存 `GITHUB_TOKEN` 的纵深防御）。但 `dev` 首次 `push(dev)`（run 29896916823）实测：`false` 使 `actions/checkout` 的凭据清理从 Post 阶段**提前进主 checkout 步骤内**，对孤立 gitlink `sysdrv/tools/board/ubuntu` 执行 `git submodule foreach` 报 `fatal … exit 128`、由良性 warning **升级为致命 error**，`build-image` checkout 失败、整个 run 失败（bootstrap 首测用默认 `persist-credentials: true`、128 落 Post=warning 故当时全绿、未暴露；机理见 §4.2）。 | **根治孤立 gitlink + 保留 `persist-credentials: false`（两全）**：本 PR `git rm --cached sysdrv/tools/board/ubuntu` 移除这个官方遗留死条目（无 url、工作区空目录、编译不用、Ubuntu 官方已弃）——checkout 不再 foreach 到任何 gitlink → **既消除 128、又保住 `false` 的纵深防御**（构建期不留短期 `GITHUB_TOKEN`）。`build.sh` 全程无远端认证 git 操作（唯一 github.com 是 `wget` 下 riscv tarball、无凭据且 RV1106 不触发），加固边际风险本就低；根治后零 128、零 warning、有加固，实现两全。**已经 `workflow_dispatch` 对新组合（gitlink 删 + `false`）端到端实测全绿**（4 job checkout 零 exit 128、零 128 warning annotation，三组合固件全绿；run 见 PR 评论）。 |
+| R8 | **CI 镜像不自动吸收 apt 安全补丁**：`build-image` 以 Dockerfile 内容 hash 为 tag、「已存在则复用」，Dockerfile 字节不变时 `RUN apt-get install` 的包（`git`/`openssl`/`openssh`/`gcc` 等）长期停留在首次 build 版本、不吸收 Ubuntu 24.04 后续安全补丁（run 29935595371 实测复用同 digest、未 rebuild）。 | 加**强制重建机制**（详见 §4.2）：手动 `force_rebuild` input + 月度 `schedule`（`0 0 1 * *`）触发 `docker build --no-cache` 重跑 apt、覆盖同 tag（tag 不堆积；旧 digest 变未标记 package version、按需清理）；`schedule` 只重建镜像、跳过固件（`if: github.event_name != 'schedule'`）。base 层保留 `@sha256` digest pin（供应链不可变、可审计），不加 `--pull`/不引入 Dependabot（避免每月提交噪音），需要时手动 bump digest。注：buildroot 2023.02.6 由 SDK 固定、不在镜像内（`build.sh` 编译时下载），不属本机制。 |
 
 ## 8. 交付物清单（Deliverables）
 
