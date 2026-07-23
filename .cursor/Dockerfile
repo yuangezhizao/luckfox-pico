@@ -39,11 +39,12 @@ ENV TZ=Asia/Shanghai
 # - 编译依赖属「核心功能」：虽平台 Aptfile 已含 sudo/curl/ca-certificates/locales/xz-utils/findutils/gzip/tar 等，但为「不依赖官方镜像、也不依赖运行时平台行为」而在镜像层完整固化自列（保证构建可复现）。
 # - buildroot 硬需但官方 apt 清单遗漏：wget、patch（平台 Aptfile 亦不含）；缺则 rootfs 阶段报 "You must install wget / GNU patch"。
 # - 绝不写 which：which 无独立实体包（命令由 essential 包 debianutils 内置、基础镜像已自带）；ubuntu:24.04（universe 默认开启）上写它会解析到虚包 gnu-which 并安装成功（退出 0）、徒增冗余包，官方镜像 Ubuntu 22.04 上则报 "E: Unable to locate package which" 致退出码 100——两种情况都不该写。
+# - 不装 openssh-server（sshd）：CI 编译与 Cloud Agent 均不需被 SSH 登录（build.sh 无 ssh/sshd 调用、平台连容器走 exec-daemon 非 sshd），而装 openssh-server 会在 docker build 时经 postinst 生成 /etc/ssh/ssh_host_*_key、烘焙进 public 镜像层（host key 泄露：下游若用此镜像启 sshd 会共享同一可提取的主机身份、可 MITM，同 CVE-2025-32755 类）；故去掉 ssh 元包（其依赖 openssh-server）与 openssh-server、仅留 openssh-client（供 git SSH 提交签名等 client 用途）。⚠️ 与开发板无关：目标固件的 sshd 由 buildroot BR2_PACKAGE_OPENSSH（两 defconfig 均已启用）从源码交叉编译进 rootfs，不依赖本 host 镜像的 openssh-server。
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      git ssh make gcc gcc-multilib g++-multilib module-assistant expect g++ gawk \
+      git make gcc gcc-multilib g++-multilib module-assistant expect g++ gawk \
       texinfo libssl-dev bison flex fakeroot cmake unzip gperf autoconf \
       device-tree-compiler libncurses5-dev pkg-config bc python-is-python3 passwd \
-      openssl openssh-server openssh-client vim file cpio rsync curl \
+      openssl openssh-client vim file cpio rsync curl \
       wget patch bzip2 xz-utils perl gzip tar findutils sed \
       sudo ca-certificates locales \
     && rm -rf /var/lib/apt/lists/*

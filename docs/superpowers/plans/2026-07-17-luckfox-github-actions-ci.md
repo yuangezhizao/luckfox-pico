@@ -15,7 +15,7 @@
 以下为 spec 的项目级约束，每个任务隐含适用（数值均照 spec 原样）：
 
 - 分支：`cursor/luckfox-github-actions-ci-76b3`（起点 `dev`）；PR base = `dev`。
-- 唯一交付代码文件：`.github/workflows/build-luckfox-pico-firmware.yml`（新建）。
+- 交付代码改动：`.github/workflows/build-luckfox-pico-firmware.yml`（新建）、`.cursor/Dockerfile`（改：移除 host sshd）、删除孤立 gitlink `sysdrv/tools/board/ubuntu`。
 - 矩阵 3 组合（均 Buildroot）：Pico Max/SD_CARD（`lunch` = `4␊0␊0`）、Pico Max/SPI_NAND（`4␊1␊0`）、Ultra W/EMMC（`5␊0␊0`）。
 - 运行环境：`.cursor/Dockerfile`（`FROM ubuntu:24.04@sha256:4fbb8e6a8395de5a7550b33509421a2bafbc0aab6c06ba2cef9ebffbc7092d90`，无 `COPY`）→ build+push `ghcr.io/<小写owner>/luckfox-pico-ci:<Dockerfile内容hash>` → `container:` 按 **digest**（`ghcr.io/<小写owner>/luckfox-pico-ci@sha256:…`）引用 + `credentials`（`github.actor` + `GITHUB_TOKEN`）拉镜像（兼容 public/private，包当前 public）。
 - 触发：`workflow_dispatch` + `push(dev)` + `schedule`（每月 1 日 UTC 00:00 强制重建 CI 镜像、仅重建镜像不编译固件，见 spec §4.2）+ `paths-ignore`（纯文档）；feature 分支首测用**临时 bootstrap**（把本分支临时加入 `push.branches`，注册/见分晓后移除）。
@@ -35,8 +35,10 @@
 
 ## File Structure
 
-- **Create:** `.github/workflows/build-luckfox-pico-firmware.yml` — 唯一新增文件，承载两 job、触发、缓存、产物、附加增强的全部逻辑。CI 配置内聚于单文件，无需拆分。
-- **复用（不改动）：** `.cursor/Dockerfile`（CI 镜像定义）、`project/build.sh`（软链 `build.sh`，选板+编译入口）、`sysdrv/Makefile`（buildroot 目标）、`project/cfg/BoardConfig_IPC/*.mk`（板级配置）、`sysdrv/tools/board/buildroot/luckfox_pico*_defconfig`（缓存 key 依据）。
+- **Create:** `.github/workflows/build-luckfox-pico-firmware.yml` — 新增的 CI 主文件，承载两 job、触发、缓存、产物、附加增强的全部逻辑。CI 配置内聚于单文件，无需拆分。
+- **Modify:** `.cursor/Dockerfile`（移除 host `openssh-server`，见 §7 R9）。
+- **Delete:** 孤立 gitlink `sysdrv/tools/board/ubuntu`（根治 checkout exit 128，见 §7 R7）。
+- **复用（不改动）：** `project/build.sh`（软链 `build.sh`，选板+编译入口）、`sysdrv/Makefile`（buildroot 目标）、`project/cfg/BoardConfig_IPC/*.mk`（板级配置）、`sysdrv/tools/board/buildroot/luckfox_pico*_defconfig`（缓存 key 依据）。
 
 ---
 
@@ -788,3 +790,16 @@ jobs:
 - **关键澄清**：buildroot 2023.02.6 由 Luckfox SDK 固定、**不在 CI 镜像内**（`build.sh` 编译时下载源码 tarball），不属本机制；本机制只更新 Dockerfile 显式安装的 host 编译工具的安全补丁。
 
 设计依据（强制重建触发、`--no-cache` 重跑 apt、base digest pin 的取舍等）见 spec §4.2「CI 镜像更新」与 §7 R8。
+
+---
+
+## 移除 host sshd（消除镜像 host key 泄露 · 2026-07-23）
+
+**背景**：`.cursor/Dockerfile` 原装 `openssh-server`（+ `ssh` 元包），postinst 于 `docker build` 生成 `/etc/ssh/ssh_host_*_key` 烘焙进 **public** 镜像层——任何人 pull 可提取该主机私钥，下游启 sshd 会共享身份、可 MITM（同 CVE-2025-32755 类）。经 brainstorming + grilling（方案 A/B/C）定为**方案 A：移除 host sshd**。
+
+- **改动**：`.cursor/Dockerfile` apt 清单去 `ssh` 元包 + `openssh-server`、仅留 `openssh-client`（供 git SSH 提交签名等 client 用途）——镜像不再生成/含 host key。
+- **前提已核实**：CI 编译（`build.sh` grep 无 ssh/sshd 调用）与 Cloud Agent（`environment.json` 无 ssh 配置、无 sshd 进程在跑、平台连容器走 exec-daemon）**均不需 sshd**。
+- **⚠️ 不影响开发板 sshd**（host/target 两条链独立，图见 spec §4.2）：目标固件 sshd 由 buildroot `BR2_PACKAGE_OPENSSH`（`luckfox_pico_defconfig:65` / `luckfox_pico_w_defconfig:97` 均已启用）从源码交叉编译进 target rootfs，与 host 镜像无关，删 host sshd 后开发板仍可远程登录。
+- **连带效果**：改 Dockerfile 使其内容 hash 变 → build-image 的 tag 变 → 下次 `push(dev)`/`dispatch` 自动 rebuild 出不含 host key 的新镜像。
+
+设计依据与 host/target 区分图见 spec §4.2 与 §7 R9。

@@ -77,7 +77,19 @@
 
 - 两个 job：`build-image`（`docker build` → push `ghcr.io/<owner>/luckfox-pico-ci:<tag>`）→ `build-firmware`（`needs: build-image`，`container:` 引用该镜像）。
 - **拉取主路径 = `container.credentials`（兼容 public/private）**：`build-firmware` 用 `container.credentials`（`username: ${{ github.actor }}`、`password: ${{ secrets.GITHUB_TOKEN }}`）拉取——此为官方文档化、同仓库 scoped 包可靠、无论镜像 public/private 都能拉。**本仓 `luckfox-pico-ci` 包当前为 public**（GHCR 新推包默认 private，本包已手动设为 public 便于复用）；仍保留 `credentials`，使 public/private 两种可见性都能稳定拉取，无需依赖「用 `GITHUB_TOKEN` 经 REST 自动改包可见性为 public」这一对**个人账号**并无稳定官方端点的路径（组织包 404、用户包多需 PAT classic、官方称无此端点）。credentials 拉取**与触发分支无关**（同仓库 scoped 包 + 本仓 `GITHUB_TOKEN` 即可读）；首测的真正门槛在「触发注册」（`workflow_dispatch` 需工作流先落默认分支才能派发），见 §4.3。
-- **当前镜像已 public 供复用**：为让镜像被他人 / AI / Cursor Cloud Agent 匿名复用，已在 web UI 把该 GHCR 包设为 public（**非 CI 运行依赖**，因 CI 用 credentials 拉取、public/private 均可）。安全边界：该 CI 镜像仅由公有 apt 包构建、**不含任何仓库机密或账号凭据**（无 `GITHUB_TOKEN`、无 git/SSH 授权私钥、无 X.509 私钥）；镜像内唯一的「密钥」是 `openssh-server` 的 postinst 于 `docker build` 时自动生成的随机 SSH **主机私钥**（`/etc/ssh/ssh_host_*_key`——非源自仓库、非账号凭据，且本 CI 全程不启动 sshd、不使用它），public 后任何人（含外部 fork）可匿名 pull/依赖它——因不含仓库机密与账号凭据、该随机 host key 亦无对外利用价值，风险可接受。GHCR 容器镜像存储对公私皆免费，故 public 与否都零成本。（注：公开包通常不能直接改回 private，如确需私有须换包名。）
+- **当前镜像已 public 供复用**：为让镜像被他人 / AI / Cursor Cloud Agent 匿名复用，已在 web UI 把该 GHCR 包设为 public（**非 CI 运行依赖**，因 CI 用 credentials 拉取、public/private 均可）。安全边界：该 CI 镜像仅由公有 apt 包构建、**不含任何密钥/凭据**（无 `GITHUB_TOKEN`、无 git/SSH 授权私钥、无 X.509 私钥，**亦无 SSH 主机私钥**——已移除 host `openssh-server`，见下）；public 后任何人（含外部 fork）可匿名 pull/依赖它、无敏感信息。GHCR 容器镜像存储对公私皆免费，故 public 与否都零成本。（注：公开包通常不能直接改回 private，如确需私有须换包名。）
+- **移除 host sshd 以消除 SSH host key 泄露**（详见 §7 R9）：原 `.cursor/Dockerfile` 装 `openssh-server`（+ `ssh` 元包依赖它），其 postinst 在 `docker build` 时生成 `/etc/ssh/ssh_host_*_key` 并烘焙进 **public** 镜像层——任何人 pull 即可提取该主机私钥，下游若用此镜像启 sshd 会共享同一身份、可 MITM（同 CVE-2025-32755 类）。因 CI 编译与 Cloud Agent **均不需 sshd**（`build.sh` 无 ssh/sshd 调用、平台连容器走 exec-daemon 非 sshd），故去掉 `ssh` 元包 + `openssh-server`、仅留 `openssh-client`（供 git SSH 提交签名等 client 用途）——镜像不再生成/含 host key。**⚠️ 与开发板 sshd 完全无关**：目标固件的 sshd 由 buildroot `BR2_PACKAGE_OPENSSH`（`luckfox_pico_defconfig`/`luckfox_pico_w_defconfig` 均已启用）从源码**交叉编译**进 target rootfs，是与 host 镜像独立的另一条链，删 host sshd 不影响开发板远程登录：
+
+```mermaid
+flowchart TB
+    subgraph HOST["host 侧：x86 编译容器（.cursor/Dockerfile）"]
+        H1["apt install openssh-server = 编译机自己的 sshd"] --> H2["CI/Agent 都不用 → 已移除（消除 host key）"]
+    end
+    subgraph TARGET["target 侧：开发板固件 rootfs（buildroot）"]
+        T1["BR2_PACKAGE_OPENSSH=y（defconfig L65/L97）"] --> T2["buildroot 从 openssh 源码 + ARM 交叉工具链编译"] --> T3["装进开发板 rootfs 的 sshd → 可远程登录 ✅"]
+    end
+    HOST -. "两条链完全独立、互不影响" .- TARGET
+```
 - 权限（**按 job 最小化**，不在顶层统一给 write）：`build-image` = `{contents: read, packages: write}`（`checkout` + 推镜像）；`build-firmware` = `{contents: read, packages: read}`（`checkout` + 用 `GITHUB_TOKEN` credentials 拉镜像仅需读）——避免 3 个固件 job 持有多余的 GHCR 写权限，符合最小权限原则；均用内置 `GITHUB_TOKEN`，无需额外 secret。
 - 镜像已含 `git`（Dockerfile 的 apt 安装块已装 `git`），便于容器内常规 git 操作；`checkout` 用常规模式即可——仓库根目录无 `.gitmodules`、无真子模块，编译所需的 lvgl 等均为普通 vendored 目录；仓库曾从官方继承一个与本 3 个 Buildroot 组合无关的**孤立 gitlink**（`sysdrv/tools/board/ubuntu`，mode 160000、无 `.gitmodules` 映射、指向已弃用的 Ubuntu rootfs），常规 checkout 对它仅留空目录、不影响编译——**本 PR 已 `git rm --cached` 清理**（见下）。**⚠️ CI 实测（关键·严重度随 `persist-credentials` 而异）**：`actions/checkout` 的凭据清理步（`Removing auth`）会对该孤立 gitlink 执行 `git submodule foreach`，因无 `.gitmodules` 登记 URL 而报 `fatal: No url found for submodule path 'sysdrv/tools/board/ubuntu' in .gitmodules` → git 退出码 128。**该 128 的严重度取决于 `persist-credentials`**：默认 `persist-credentials: true` 时凭据清理延后到 **Post 阶段**执行、128 仅是**一条良性 `warning` annotation**（每 job 一条，bootstrap 首测 4 条）、**非致命、不阻断**（三组合 run 全绿、artifact 正常）；但设 `persist-credentials: false` 时凭据清理**提前进主 checkout 步骤内**、同一 128 即成 `##[error]` **致 checkout 步骤失败、job 失败**（`dev` 首次 `push(dev)` run 29896916823 的 `build-image` 实测：checkout 完成后紧接 `Removing auth` 的 `submodule foreach` → exit 128 → 步骤失败、后续 matrix job 因 `needs` 未执行）。**本 PR 已 `git rm --cached sysdrv/tools/board/ubuntu` 根治该孤立 gitlink**（它是官方「删 `.gitmodules` 却漏删 gitlink 条目」的遗留死条目：无 url、工作区仅空目录、编译不用、Ubuntu 支持官方早已删除，见 §9 QA）——清理后 checkout 不再对任何 gitlink 执行 `submodule foreach` → **无 128**，故两处 `checkout` **安全启用 `persist-credentials: false`**（构建期不在 `.git` 留存短期 `GITHUB_TOKEN` 的纵深防御），**既消除 128、又保住加固，两全其美**（详见 §7 R7）。
 - Ubuntu 版本用 24.04：`ubuntu-24.04` 为当前 GA 的 `ubuntu-latest`；本仓 `.cursor/Dockerfile` 已实测 24.04 编译成功两板（host gcc13/glibc2.39）——目标固件 ABI 由内置交叉工具链（`arm-rockchip830` uClibc）决定、目标二进制不链接 host glibc，但 buildroot 构建期仍用 host gcc/libc 编译大量 HOSTCC 工具、host 工具链仍是构建依赖（故非跨时间字节可复现，见 N2）。超出官方仅支持的 22.04，但实测可编、风险可控。
@@ -153,16 +165,19 @@
 | R6 | **GHCR 个人账号无稳定的「自动 public 化」端点**（组织包 404、用户包多需 PAT classic、官方称无端点）；且 `workflow_dispatch` 需工作流先在默认分支才能派发——本 feature 分支首测前工作流未注册、无从手动派发（**非** GHCR 权限问题）。 | CI 拉取用 `container.credentials`（`GITHUB_TOKEN`）拉镜像（兼容 public/private）、**与触发分支无关**；首测经「临时加宽触发做 bootstrap 注册」在本分支跑（见 §4.3），通过后移除、恢复 `workflow_dispatch`+`push(dev)`；「对外 public 复用」为可选手动、非 CI 依赖。 |
 | R7 | **`persist-credentials: false` 曾与孤立 gitlink 交互致 checkout 失败（本 PR 已根治）**：收尾曾给两 job 的 `checkout` 加 `persist-credentials: false`（不在构建期 `.git` 留存 `GITHUB_TOKEN` 的纵深防御）。但 `dev` 首次 `push(dev)`（run 29896916823）实测：`false` 使 `actions/checkout` 的凭据清理从 Post 阶段**提前进主 checkout 步骤内**，对孤立 gitlink `sysdrv/tools/board/ubuntu` 执行 `git submodule foreach` 报 `fatal … exit 128`、由良性 warning **升级为致命 error**，`build-image` checkout 失败、整个 run 失败（bootstrap 首测用默认 `persist-credentials: true`、128 落 Post=warning 故当时全绿、未暴露；机理见 §4.2）。 | **根治孤立 gitlink + 保留 `persist-credentials: false`（两全）**：本 PR `git rm --cached sysdrv/tools/board/ubuntu` 移除这个官方遗留死条目（无 url、工作区空目录、编译不用、Ubuntu 官方已弃）——checkout 不再 foreach 到任何 gitlink → **既消除 128、又保住 `false` 的纵深防御**（构建期不留短期 `GITHUB_TOKEN`）。`build.sh` 全程无远端认证 git 操作（唯一 github.com 是 `wget` 下 riscv tarball、无凭据且 RV1106 不触发），加固边际风险本就低；根治后零 128、零 warning、有加固，实现两全。**已经 `workflow_dispatch` 对新组合（gitlink 删 + `false`）端到端实测全绿**（4 job checkout 零 exit 128、零 128 warning annotation，三组合固件全绿；run 见 PR 评论）。 |
 | R8 | **CI 镜像不自动吸收 apt 安全补丁**：`build-image` 以 Dockerfile 内容 hash 为 tag、「已存在则复用」，Dockerfile 字节不变时 `RUN apt-get install` 的包（`git`/`openssl`/`openssh`/`gcc` 等）长期停留在首次 build 版本、不吸收 Ubuntu 24.04 后续安全补丁（run 29935595371 实测复用同 digest、未 rebuild）。 | 加**强制重建机制**（详见 §4.2）：手动 `force_rebuild` input + 月度 `schedule`（`0 0 1 * *`）触发 `docker build --no-cache` 重跑 apt、覆盖同 tag（tag 不堆积；旧 digest 变未标记 package version、按需清理）；`schedule` 只重建镜像、跳过固件（`if: github.event_name != 'schedule'`）。base 层保留 `@sha256` digest pin（供应链不可变、可审计），不加 `--pull`/不引入 Dependabot（避免每月提交噪音），需要时手动 bump digest。注：buildroot 2023.02.6 由 SDK 固定、不在镜像内（`build.sh` 编译时下载），不属本机制。 |
+| R9 | **CI 镜像烘焙 SSH host key（public 泄露）**：原 `.cursor/Dockerfile` 装 `openssh-server`（+ `ssh` 元包），postinst 于 `docker build` 生成 `/etc/ssh/ssh_host_*_key` 烘焙进 **public** 镜像层，任何人 pull 可提取；下游用此镜像启 sshd 会共享同一主机身份、可 MITM（同 CVE-2025-32755 类）。 | **移除 host sshd**：CI 编译与 Cloud Agent 均不需 sshd（`build.sh` 无 ssh/sshd 调用、平台走 exec-daemon 非 sshd），去 `ssh` 元包 + `openssh-server`、仅留 `openssh-client`（git SSH 提交签名等）——镜像不再含 host key。**不影响开发板 sshd**：目标固件 sshd 由 buildroot `BR2_PACKAGE_OPENSSH`（两 defconfig 已启用）独立交叉编译（host/target 区分详见 §4.2 图）。改 Dockerfile 使其内容 hash 变 → 下次 build-image 自动 rebuild 出不含 host key 的新镜像。 |
 
 ## 8. 交付物清单（Deliverables）
 
 | 文件 | 作用 |
 | --- | --- |
 | `.github/workflows/build-luckfox-pico-firmware.yml` | CI 主文件：两 job（build-image → build-firmware matrix）、触发、缓存、产物、附加增强 |
+| `.cursor/Dockerfile`（改） | CI 镜像定义：本 PR 移除 host `openssh-server`（消除 SSH host key 泄露，见 §7 R9） |
+| `sysdrv/tools/board/ubuntu`（删） | 清理官方遗留的孤立 gitlink（根治 checkout exit 128，见 §7 R7） |
 | 本 spec | 设计规格与决策依据 |
 | 关联 plan | 逐任务、含完整 YAML 的实施计划 |
 
-（`.cursor/Dockerfile` 已存在、无需改动，直接被 CI 复用。）
+（`.cursor/Dockerfile` 之外的既有文件——`project/build.sh`、`sysdrv/Makefile`、板级配置等——直接被 CI 复用、不改动。）
 
 ## 9. QA（设计澄清 Q&A）
 
