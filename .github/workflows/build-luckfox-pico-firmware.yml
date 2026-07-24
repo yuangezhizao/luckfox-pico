@@ -30,6 +30,8 @@ jobs:
     permissions:
       contents: read
       packages: write
+      id-token: write       # actions/attest：Sigstore keyless 签名
+      attestations: write   # actions/attest：上传 attestation 到 GH API
     outputs:
       image: ${{ steps.build.outputs.image }}
     steps:
@@ -53,26 +55,81 @@ jobs:
         env:
           # schedule（月度）或手动 force_rebuild 时强制重建，吸收 Dockerfile apt 包的安全更新
           FORCE_REBUILD: ${{ github.event_name == 'schedule' || inputs.force_rebuild == true }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}   # gh attestation verify 需
         run: |
           set -euo pipefail
+          # 断言 digest 合法（sha256:<64hex>），否则 fail loud——防 jq 缺键返回字面量 null 静默下传（见 spec §7 R10）
+          assert_digest() {  # $1=场景 $2=digest
+            [[ "$2" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "❌ ${1}: 非法 digest '${2}'（期望 sha256:<64hex>）——中止（fail loud）"; exit 1; }
+          }
           OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
           IMAGE_REF="ghcr.io/${OWNER}/luckfox-pico-ci"
           TAG=$(sha256sum .cursor/Dockerfile | cut -c1-32)
           echo "镜像标签（Dockerfile 内容 hash）= ${TAG}"
+          REBUILT=false
           if [ "${FORCE_REBUILD}" = "true" ]; then
             echo "🔁 强制重建（schedule 月度 / 手动 force_rebuild）：--no-cache 重跑 apt、跳过复用"
-            docker build --no-cache -f .cursor/Dockerfile -t "${IMAGE_REF}:${TAG}" .cursor
-            docker push "${IMAGE_REF}:${TAG}"
-          elif docker buildx imagetools inspect "${IMAGE_REF}:${TAG}" >/dev/null 2>&1; then
-            echo "✅ ${IMAGE_REF}:${TAG} 已存在，复用（不 rebuild）"
+            # 一步 build+push，digest 取自构建产物（buildx metadata 的 containerimage.digest），
+            # 绝不再按 mutable tag 二次 inspect——消除 push→inspect 之间被重指 tag 的 TOCTOU（见 spec §7 R10）
+            docker buildx build --no-cache --push -f .cursor/Dockerfile -t "${IMAGE_REF}:${TAG}" --metadata-file /tmp/bx-meta.json .cursor
+            REBUILT=true
+            DIGEST=$(jq -er '."containerimage.digest" // empty' /tmp/bx-meta.json) \
+              || { echo "❌ force_rebuild: buildx metadata 缺 containerimage.digest——中止（fail loud）"; exit 1; }
+            assert_digest "force_rebuild" "${DIGEST}"
+          elif INSPECT_OUT=$(docker buildx imagetools inspect "${IMAGE_REF}:${TAG}" 2>&1); then
+            echo "✅ ${IMAGE_REF}:${TAG} 已存在——先验证 build provenance 再复用（防 GHCR 复用投毒，见 spec §7 R10）"
+            DIGEST=$(docker buildx imagetools inspect "${IMAGE_REF}:${TAG}" --format '{{json .Manifest.Digest}}' | xargs) \
+              || { echo "❌ 复用: imagetools inspect 取 Manifest.Digest 失败——中止（fail loud）"; exit 1; }
+            assert_digest "复用/inspect" "${DIGEST}"
+            # 验证 build provenance：signer 与 source 均锁定受保护的 dev 分支——feature 分支签发的 attestation 不被信任，
+            # 防具写权限者从自有分支 dispatch 签恶意镜像绕过；单次验证、失败即 fail loud（不对瞬时故障重试，理由见 spec §9 Q15）
+            # 保障边界见 spec §7 R10 / §9 Q13：本验证防 registry 层投毒，不含防回滚/新鲜度、不替代 dev 分支治理
+            # 用 --format json：CI 非 TTY 下 gh「成功即静默」，唯 --format json 有输出；成功打印 jq 格式化的
+            # verificationResult（完整解析结果：证书身份 + Rekor 时间戳 + statement，无 base64 bundle 噪音）
+            if OUT=$(gh attestation verify "oci://${IMAGE_REF}@${DIGEST}" \
+                  --repo "${{ github.repository }}" \
+                  --source-ref refs/heads/dev \
+                  --signer-workflow "${{ github.repository }}/.github/workflows/build-luckfox-pico-firmware.yml@refs/heads/dev" \
+                  --bundle-from-oci --format json 2>&1); then
+              echo "✅ provenance 验证通过（signer/source=dev），复用（被验证的 digest 即下游所用）；验证详情："
+              echo "${OUT}" | jq '.[].verificationResult' 2>/dev/null || echo "${OUT}"
+            else
+              # 失败：打印 gh 报错 + 宽松复验（仅 --repo 作信任锚、不绑 signer/source）的完整 verificationResult，打印实际 signer/source 供对比
+              echo "❌ 复用镜像 build provenance 强验证（signer/source=dev）未通过——疑似复用投毒或验证服务不可用，拒绝使用并中止（fail loud）。gh 报错："
+              echo "${OUT}"
+              echo "  ↳ 宽松复验（仅 --repo 作信任锚、不绑 signer/source）该 digest attestation 的完整解析结果（对比实际 signer/source）："
+              gh attestation verify "oci://${IMAGE_REF}@${DIGEST}" --repo "${{ github.repository }}" --bundle-from-oci --format json 2>/dev/null \
+                | jq '.[].verificationResult' 2>/dev/null \
+                || echo "  （未取到 attestation：无签名，或 Sigstore/Rekor/GHCR 暂不可达）"
+              exit 1
+            fi
           else
+            # inspect 非零：tag 不存在，或 registry 网络/鉴权/5xx 等故障——一律回退可信重建（重建当前 checkout 的 Dockerfile、不放行未验证镜像）；打印 inspect 输出、不静默
+            echo "⚠️ imagetools inspect 未成功（tag 不存在，或 registry/网络/鉴权故障），回退到可信重建；inspect 输出如下："
+            echo "${INSPECT_OUT}"
             echo "🔨 构建并推送 ${IMAGE_REF}:${TAG}"
-            docker build -f .cursor/Dockerfile -t "${IMAGE_REF}:${TAG}" .cursor
-            docker push "${IMAGE_REF}:${TAG}"
+            # 同上：一步 build+push + metadata digest，消除 push→inspect 的 TOCTOU
+            docker buildx build --push -f .cursor/Dockerfile -t "${IMAGE_REF}:${TAG}" --metadata-file /tmp/bx-meta.json .cursor
+            REBUILT=true
+            DIGEST=$(jq -er '."containerimage.digest" // empty' /tmp/bx-meta.json) \
+              || { echo "❌ 首建: buildx metadata 缺 containerimage.digest——中止（fail loud）"; exit 1; }
+            assert_digest "首建" "${DIGEST}"
           fi
-          DIGEST=$(docker buildx imagetools inspect "${IMAGE_REF}:${TAG}" --format '{{json .Manifest.Digest}}' | xargs)
           echo "镜像 digest = ${DIGEST}"
-          echo "image=${IMAGE_REF}@${DIGEST}" >> "$GITHUB_OUTPUT"
+          {
+            echo "image=${IMAGE_REF}@${DIGEST}"
+            echo "image_name=${IMAGE_REF}"
+            echo "digest=${DIGEST}"
+            echo "rebuilt=${REBUILT}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: 🔏 生成 build provenance attestation（仅新建镜像时；复用镜像的 provenance 已在上步验证）
+        if: steps.build.outputs.rebuilt == 'true'
+        uses: actions/attest@v4
+        with:
+          subject-name: ${{ steps.build.outputs.image_name }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
 
   build-firmware:
     name: 🛠️ ${{ matrix.title }}

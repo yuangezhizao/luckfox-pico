@@ -10,16 +10,18 @@
 
 **关联 spec:** [`docs/superpowers/specs/2026-07-17-luckfox-github-actions-ci-design.md`](../specs/2026-07-17-luckfox-github-actions-ci-design.md)
 
+> **⚠️ 阅读说明**：本 plan 的 **Architecture、Tech Stack 及下方 Task 1–6 的步骤/YAML** 是 **PR #2 首版 SDD 的历史实施记录**（例如 Task 2 仍写 `docker build`/`docker push`、旧权限）；**PR #3 的最终形态以「附录 A」（字节等同最终 workflow）+ 各 PR #3 专节（回归修复 / 镜像重建机制 / 移除 host sshd / build provenance）+ 上方 Global Constraints 为准**——含 `docker buildx build --metadata-file`、build provenance attest/verify、`id-token`/`attestations` 权限等。历史 Task 段仅作演进留存、不代表当前实现。
+
 ## Global Constraints
 
 以下为 spec 的项目级约束，每个任务隐含适用（数值均照 spec 原样）：
 
-- 分支：`cursor/luckfox-github-actions-ci-76b3`（起点 `dev`）；PR base = `dev`。
+- 分支：`cursor/luckfox-github-actions-ci-76b3`（原 CI PR #2 实施分支，起点 `dev`）；PR base = `dev`。（PR #3 的回归修复 / 强制重建 / 移除 sshd / build provenance 加固在分支 `cursor/fix-ci-persist-credentials-76b3`，见 spec 状态行/分支行与下方各 PR #3 专节：「回归修复」「镜像重建机制」「移除 host sshd」「build provenance attestation」）
 - 交付代码改动：`.github/workflows/build-luckfox-pico-firmware.yml`（新建）、`.cursor/Dockerfile`（改：移除 host sshd）、删除孤立 gitlink `sysdrv/tools/board/ubuntu`。
 - 矩阵 3 组合（均 Buildroot）：Pico Max/SD_CARD（`lunch` = `4␊0␊0`）、Pico Max/SPI_NAND（`4␊1␊0`）、Ultra W/EMMC（`5␊0␊0`）。
 - 运行环境：`.cursor/Dockerfile`（`FROM ubuntu:24.04@sha256:4fbb8e6a8395de5a7550b33509421a2bafbc0aab6c06ba2cef9ebffbc7092d90`，无 `COPY`）→ build+push `ghcr.io/<小写owner>/luckfox-pico-ci:<Dockerfile内容hash>` → `container:` 按 **digest**（`ghcr.io/<小写owner>/luckfox-pico-ci@sha256:…`）引用 + `credentials`（`github.actor` + `GITHUB_TOKEN`）拉镜像（兼容 public/private，包当前 public）。
 - 触发：`workflow_dispatch` + `push(dev)` + `schedule`（每月 1 日 UTC 00:00 强制重建 CI 镜像、仅重建镜像不编译固件，见 spec §4.2）+ `paths-ignore`（纯文档）；feature 分支首测用**临时 bootstrap**（把本分支临时加入 `push.branches`，注册/见分晓后移除）。
-- 权限**按 job 最小化**：`build-image` = `{contents: read, packages: write}`；`build-firmware` = `{contents: read, packages: read}`。
+- 权限**按 job 最小化**：`build-image` = `{contents: read, packages: write, id-token: write, attestations: write}`（后二者供 `actions/attest` 生成/上传 build provenance）；`build-firmware` = `{contents: read, packages: read}`。
 - 矩阵 `fail-fast: false`；`build-firmware` `timeout-minutes: 120`、`build-image` `timeout-minutes: 30`。
 - 缓存：`BR2_DL_DIR=$GITHUB_WORKSPACE/.br-dl`（容器内挂载卷、buildroot **树外**，经 `GITHUB_ENV` 设置）；`actions/cache` `path: .br-dl`（相对 `GITHUB_WORKSPACE`、与前者同指）、key = `br-dl-buildroot-2023.02.6-<defconfig名>-<defconfig内容hash>` + `restore-keys` 同 defconfig 前缀回退。defconfig 映射：Pico Max（SD_CARD/SPI_NAND）→ `luckfox_pico_defconfig`；Ultra W（EMMC）→ `luckfox_pico_w_defconfig`。
 - 产物：`output/image/` 全部**非隐藏**产物（隐藏 `.env.txt` 不纳入）+ `IMAGE/*_RELEASE_TEST/build_info.txt`；`upload-artifact` 设 `if-no-files-found: error`；artifact 名 `luckfox-pico-firmware_<board>-<medium>_on-ubuntu-24.04`。
@@ -545,6 +547,8 @@ jobs:
     permissions:
       contents: read
       packages: write
+      id-token: write       # actions/attest：Sigstore keyless 签名
+      attestations: write   # actions/attest：上传 attestation 到 GH API
     outputs:
       image: ${{ steps.build.outputs.image }}
     steps:
@@ -568,26 +572,81 @@ jobs:
         env:
           # schedule（月度）或手动 force_rebuild 时强制重建，吸收 Dockerfile apt 包的安全更新
           FORCE_REBUILD: ${{ github.event_name == 'schedule' || inputs.force_rebuild == true }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}   # gh attestation verify 需
         run: |
           set -euo pipefail
+          # 断言 digest 合法（sha256:<64hex>），否则 fail loud——防 jq 缺键返回字面量 null 静默下传（见 spec §7 R10）
+          assert_digest() {  # $1=场景 $2=digest
+            [[ "$2" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "❌ ${1}: 非法 digest '${2}'（期望 sha256:<64hex>）——中止（fail loud）"; exit 1; }
+          }
           OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
           IMAGE_REF="ghcr.io/${OWNER}/luckfox-pico-ci"
           TAG=$(sha256sum .cursor/Dockerfile | cut -c1-32)
           echo "镜像标签（Dockerfile 内容 hash）= ${TAG}"
+          REBUILT=false
           if [ "${FORCE_REBUILD}" = "true" ]; then
             echo "🔁 强制重建（schedule 月度 / 手动 force_rebuild）：--no-cache 重跑 apt、跳过复用"
-            docker build --no-cache -f .cursor/Dockerfile -t "${IMAGE_REF}:${TAG}" .cursor
-            docker push "${IMAGE_REF}:${TAG}"
-          elif docker buildx imagetools inspect "${IMAGE_REF}:${TAG}" >/dev/null 2>&1; then
-            echo "✅ ${IMAGE_REF}:${TAG} 已存在，复用（不 rebuild）"
+            # 一步 build+push，digest 取自构建产物（buildx metadata 的 containerimage.digest），
+            # 绝不再按 mutable tag 二次 inspect——消除 push→inspect 之间被重指 tag 的 TOCTOU（见 spec §7 R10）
+            docker buildx build --no-cache --push -f .cursor/Dockerfile -t "${IMAGE_REF}:${TAG}" --metadata-file /tmp/bx-meta.json .cursor
+            REBUILT=true
+            DIGEST=$(jq -er '."containerimage.digest" // empty' /tmp/bx-meta.json) \
+              || { echo "❌ force_rebuild: buildx metadata 缺 containerimage.digest——中止（fail loud）"; exit 1; }
+            assert_digest "force_rebuild" "${DIGEST}"
+          elif INSPECT_OUT=$(docker buildx imagetools inspect "${IMAGE_REF}:${TAG}" 2>&1); then
+            echo "✅ ${IMAGE_REF}:${TAG} 已存在——先验证 build provenance 再复用（防 GHCR 复用投毒，见 spec §7 R10）"
+            DIGEST=$(docker buildx imagetools inspect "${IMAGE_REF}:${TAG}" --format '{{json .Manifest.Digest}}' | xargs) \
+              || { echo "❌ 复用: imagetools inspect 取 Manifest.Digest 失败——中止（fail loud）"; exit 1; }
+            assert_digest "复用/inspect" "${DIGEST}"
+            # 验证 build provenance：signer 与 source 均锁定受保护的 dev 分支——feature 分支签发的 attestation 不被信任，
+            # 防具写权限者从自有分支 dispatch 签恶意镜像绕过；单次验证、失败即 fail loud（不对瞬时故障重试，理由见 spec §9 Q15）
+            # 保障边界见 spec §7 R10 / §9 Q13：本验证防 registry 层投毒，不含防回滚/新鲜度、不替代 dev 分支治理
+            # 用 --format json：CI 非 TTY 下 gh「成功即静默」，唯 --format json 有输出；成功打印 jq 格式化的
+            # verificationResult（完整解析结果：证书身份 + Rekor 时间戳 + statement，无 base64 bundle 噪音）
+            if OUT=$(gh attestation verify "oci://${IMAGE_REF}@${DIGEST}" \
+                  --repo "${{ github.repository }}" \
+                  --source-ref refs/heads/dev \
+                  --signer-workflow "${{ github.repository }}/.github/workflows/build-luckfox-pico-firmware.yml@refs/heads/dev" \
+                  --bundle-from-oci --format json 2>&1); then
+              echo "✅ provenance 验证通过（signer/source=dev），复用（被验证的 digest 即下游所用）；验证详情："
+              echo "${OUT}" | jq '.[].verificationResult' 2>/dev/null || echo "${OUT}"
+            else
+              # 失败：打印 gh 报错 + 宽松复验（仅 --repo 作信任锚、不绑 signer/source）的完整 verificationResult，打印实际 signer/source 供对比
+              echo "❌ 复用镜像 build provenance 强验证（signer/source=dev）未通过——疑似复用投毒或验证服务不可用，拒绝使用并中止（fail loud）。gh 报错："
+              echo "${OUT}"
+              echo "  ↳ 宽松复验（仅 --repo 作信任锚、不绑 signer/source）该 digest attestation 的完整解析结果（对比实际 signer/source）："
+              gh attestation verify "oci://${IMAGE_REF}@${DIGEST}" --repo "${{ github.repository }}" --bundle-from-oci --format json 2>/dev/null \
+                | jq '.[].verificationResult' 2>/dev/null \
+                || echo "  （未取到 attestation：无签名，或 Sigstore/Rekor/GHCR 暂不可达）"
+              exit 1
+            fi
           else
+            # inspect 非零：tag 不存在，或 registry 网络/鉴权/5xx 等故障——一律回退可信重建（重建当前 checkout 的 Dockerfile、不放行未验证镜像）；打印 inspect 输出、不静默
+            echo "⚠️ imagetools inspect 未成功（tag 不存在，或 registry/网络/鉴权故障），回退到可信重建；inspect 输出如下："
+            echo "${INSPECT_OUT}"
             echo "🔨 构建并推送 ${IMAGE_REF}:${TAG}"
-            docker build -f .cursor/Dockerfile -t "${IMAGE_REF}:${TAG}" .cursor
-            docker push "${IMAGE_REF}:${TAG}"
+            # 同上：一步 build+push + metadata digest，消除 push→inspect 的 TOCTOU
+            docker buildx build --push -f .cursor/Dockerfile -t "${IMAGE_REF}:${TAG}" --metadata-file /tmp/bx-meta.json .cursor
+            REBUILT=true
+            DIGEST=$(jq -er '."containerimage.digest" // empty' /tmp/bx-meta.json) \
+              || { echo "❌ 首建: buildx metadata 缺 containerimage.digest——中止（fail loud）"; exit 1; }
+            assert_digest "首建" "${DIGEST}"
           fi
-          DIGEST=$(docker buildx imagetools inspect "${IMAGE_REF}:${TAG}" --format '{{json .Manifest.Digest}}' | xargs)
           echo "镜像 digest = ${DIGEST}"
-          echo "image=${IMAGE_REF}@${DIGEST}" >> "$GITHUB_OUTPUT"
+          {
+            echo "image=${IMAGE_REF}@${DIGEST}"
+            echo "image_name=${IMAGE_REF}"
+            echo "digest=${DIGEST}"
+            echo "rebuilt=${REBUILT}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: 🔏 生成 build provenance attestation（仅新建镜像时；复用镜像的 provenance 已在上步验证）
+        if: steps.build.outputs.rebuilt == 'true'
+        uses: actions/attest@v4
+        with:
+          subject-name: ${{ steps.build.outputs.image_name }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
 
   build-firmware:
     name: 🛠️ ${{ matrix.title }}
@@ -761,7 +820,7 @@ jobs:
 
 **首测实测**：container 根盘 `overlay` 实测 145G，Ultra W 峰值 74G/51%、余量 ≥71G，**未爆盘**——B1 容器方案在标准 runner 上无需磁盘释放；产物 zip：Ultra 180MB / SPI_NAND 118MB / SD_CARD 99MB。
 
-**提交整理**：本 PR 原含 22 个分步提交（spec 多轮 review + workflow 分步实现 + 首测回填），最终整理为 **2 个提交**——`ci(github-actions): 👷 …workflow`（保留首次提交时间 2026-07-17）+ `docs(superpowers): …spec 与 plan`（PR 最后一个提交）。本 plan 与 spec 内容即对应第 2 个提交、与最终 workflow 逐字一致。
+**提交整理**：**本节记录的是原始 CI 实现 PR（#2，已合并入 `dev`）**——该 PR 原含 22 个分步提交（spec 多轮 review + workflow 分步实现 + 首测回填），最终整理为 **2 个提交**（`ci(github-actions): 👷 …workflow` 保留首次提交时间 2026-07-17 + `docs(superpowers): …spec 与 plan`）。**其后的回归修复 / 强制重建 / 移除 host sshd / build provenance 属另一个 PR（#3），为 4 个提交，见下方对应专节**；本 plan 与 spec 随各 PR 同步更新、与最终 workflow 逐字一致。
 
 > 说明：上方各 Task 内的 `git commit` / `git push` 步骤是**实施计划的执行指令**（当时按 SDD 分步落地）；PR 合入前已按「开发 + 文档」两个提交重新整理，故 git 历史为 2 个提交而非逐 Task 提交——这是有意的历史整理，不影响计划内容与最终交付的一致性。
 
@@ -784,7 +843,7 @@ jobs:
 **背景**：`build-image` 以 `.cursor/Dockerfile` 内容 hash 为 tag、默认「已存在则复用」，故 Dockerfile 字节不变时其 `RUN apt-get install` 的包不会自动吸收 Ubuntu 24.04 安全补丁（run 29935595371 实测复用同 digest、未 rebuild）。经 brainstorming + grilling 定稿如下方案（当前 PR 一并实现，属 `feat`）。
 
 - **触发**：新增 `workflow_dispatch` 的 `force_rebuild` boolean input（手动按需）+ `schedule: '0 0 1 * *'`（北京每月 1 日 08:00 = UTC 00:00，自动兜底）。
-- **build-image**：`FORCE_REBUILD = (github.event_name=='schedule') || (inputs.force_rebuild==true)`；为真时跳过「已存在则复用」、`docker build --no-cache` 重跑 apt + push（覆盖同 tag、digest 更新，tag 不堆积；旧 digest 变未标记 package version、按需清理即可）。
+- **build-image**：`FORCE_REBUILD = (github.event_name=='schedule') || (inputs.force_rebuild==true)`；为真时跳过「已存在则复用」、用 buildx 无缓存重建、推送并从构建 metadata 取不可变 digest（重跑 apt、覆盖同 tag；旧 digest 变未标记 package version、按需清理即可）。
 - **build-firmware**：`if: github.event_name != 'schedule'`——schedule 只重建镜像、跳过 3 组合固件（每月约 3min）；push(dev)/dispatch 仍跑完整。
 - **base image**：保留 `FROM …@sha256` digest pin（供应链不可变、可审计）；不加 `--pull`（对 pin digest 无实际作用）、不引入 Dependabot（避免每月约 1 条 bump digest 的提交噪音）；base 底层需要时手动 bump digest（低频、经 PR）。
 - **关键澄清**：buildroot 2023.02.6 由 Luckfox SDK 固定、**不在 CI 镜像内**（`build.sh` 编译时下载源码 tarball），不属本机制；本机制只更新 Dockerfile 显式安装的 host 编译工具的安全补丁。
@@ -803,3 +862,51 @@ jobs:
 - **连带效果**：改 Dockerfile 使其内容 hash 变 → build-image 的 tag 变 → 下次 `push(dev)`/`dispatch` 自动 rebuild 出不含 host key 的新镜像。
 
 设计依据与 host/target 区分图见 spec §4.2 与 §7 R9。
+
+---
+
+## build provenance attestation（防 GHCR 复用投毒 · 2026-07-24）
+
+**背景**：`build-image` 以 `TAG=sha256(.cursor/Dockerfile)` 命名、「tag 已存在则复用」；tag/digest 只保证「同一 run 内 3 组合用同一镜像」，**非来源证明**。具 `packages:write` 者（仓库主 / 泄露 token / 恶意协作者）若把恶意镜像推到该 tag，复用路径会将其作 `build-firmware` 容器执行（跑 `build.sh` 任意代码 + 持 `GITHUB_TOKEN`）。本仓 public（匿名仅 pull）、写权限受控、`force_rebuild` 可复原，风险低但非零。经 brainstorming + grilling 定为**方案 A（build provenance + 复用验证，闭环）**（当前 PR 一并实现，属独立 `feat`）。
+
+- **生成**（新建镜像时）：`actions/attest@v4`（浮动 major、与现有 action 同步）以 `subject-name`（全限定、不含 tag）+ `subject-digest` + `push-to-registry: true` 生成 SLSA build-provenance、Sigstore keyless 签名、附在 GHCR 镜像旁；`if: steps.build.outputs.rebuilt == 'true'` 仅在真正 build（force_rebuild / 首建）后运行。**`subject-digest` 取自 `docker buildx build --push --metadata-file` 的 `containerimage.digest`（构建产物本身），不按 mutable tag 二次 `imagetools inspect`——杜绝「push→回读」间 tag 被重指、为恶意 digest 签发合法 provenance 的 TOCTOU。**
+- **验证**（复用镜像前）：`gh attestation verify oci://<image>@<digest> --repo <本仓> --source-ref refs/heads/dev --signer-workflow <本仓>/.github/workflows/build-luckfox-pico-firmware.yml@refs/heads/dev --bundle-from-oci`；**单次验证、失败即 `exit 1`（fail loud**：宁显式报警感知投毒，不自愈掩盖；不对瞬时故障重试，理由见 spec §9 Q15——低频 `push(dev)` + 重跑可恢复）。
+- **验证位置**：放 `build-image` 复用路径——`build-firmware` 是 container job、镜像在 job 启动即被 runner 拉取、无「进容器前」步骤，无法 job 内先验证；故在 build-image 决定「复用 vs rebuild」处拦截。
+- **权限**：`build-image` 加 `id-token: write`（Sigstore 签名）+ `attestations: write`（上传 GH API），叠加原 `contents: read` + `packages: write`。
+- **信任断言**：`--signer-workflow …yml@refs/heads/dev` + `--source-ref refs/heads/dev` **锁定受保护的 dev 分支**——不仅防本仓其他 workflow 误签，更防「具写权限者在自有 feature 分支放同名 workflow、`workflow_dispatch` 签恶意镜像」被复用验证接受（`gh` 的 `--signer-workflow` 按正则匹配，不带 `@ref` 会接受任意 ref 签发的 attestation）。**代价**：build-image 由非 dev ref 触发时生成的 attestation（signer=该 ref）不被复用验证信任——日常镜像生成本就随 `push(dev)`/dev 上 `schedule` 发生（signer=dev）、符合预期。
+- **bootstrap / 重签（signer 绑 dev 后必需）**：早前已由 fix 分支 `force_rebuild=true` dispatch 为当前 Dockerfile 的 tag/digest 生成过 attestation，但其 signer=feature ref、**绑定 dev 后不再被复用验证信任**；故本加固**合并进 dev 后须在 dev 上再跑一次 `force_rebuild=true`**（`workflow_dispatch`，signer=dev）重签，之后 Dockerfile 不变则 `push(dev)` 复用验证直接通过；未来 Dockerfile 变→新 tag 走 build+attest 自动生成（由 dev 触发即 signer=dev）。
+- **signer 标志选型（`--signer-workflow` vs `--cert-identity`）**：本轮保留 `--signer-workflow …@refs/heads/dev`（正则、官方主推、兼容 reusable）+ `--source-ref refs/heads/dev`（精确兜底）；`--cert-identity`（精确锁 SAN 整串）更精准但更脆、且 fix 分支无法预验证，**推迟**到 dev 首个强 verify 绿灯后再作独立加固评估。场景对比与完整理由见 spec §9 Q12。
+- **保障边界（诚实声明，完整范围见 spec §9 Q13）**：本机制防 **registry 层投毒**（有 `packages:write` 但无法在 dev 产生合法 OIDC 签名者）；**不含**防回滚/新鲜度（attestation 绑 digest 不绑 tag，可被重指到另一 dev 合法签名的旧/异构 digest）、**不替代** dev 分支治理（信任根=谁能改 dev；当前 ruleset 0 必需审批、无 CODEOWNERS）。强化：另存期望 digest 或核验 source-commit Dockerfile 哈希（复杂且脆、暂不做）；CODEOWNERS+必需审批 或 独立 reusable「trusted builder」。
+
+方案 A vs B（SLSA L3 `slsa-github-generator`）、fail loud vs 自愈、验证位置等设计依据见 spec §4.2 与 §7 R10。
+
+### 镜像来源与两条路径安全模型（force_rebuild vs 复用）
+
+**镜像如何从 `build-image` 传到 `build-firmware`**：二者是独立 job、跑在不同 runner VM，故镜像必经 GHCR 中转、由 `build-firmware` 的 runner 按**不可变 `@digest`** 拉取（非本地镜像传递）。故「固件编译用的是从 GHCR pull 回来的镜像、不是 build-image 的本地镜像」：
+
+```mermaid
+flowchart TB
+    subgraph VM1["build-image · runner VM #1"]
+        A["checkout 当前分支 .cursor/Dockerfile"] --> B["docker buildx build --push --metadata-file"]
+        B --> C["DIGEST = metadata.containerimage.digest（构建产物）"]
+        C --> D["outputs.image = ghcr.io/…@sha256:DIGEST"]
+    end
+    B -->|"push tag=sha256(Dockerfile)"| GHCR[("GHCR：按 digest 内容寻址、内容不可变")]
+    subgraph VM2["build-firmware ×3 · runner VM #2/#3/#4"]
+        F["runner 按 @sha256:DIGEST 从 GHCR pull 作 job 容器"] --> G["容器内 ./build.sh 编译固件"]
+    end
+    D -->|"@digest 作 container.image"| F
+    GHCR -->|"pull @digest"| F
+```
+
+**两条路径威胁模型不同、各有防御**：
+
+| 路径 | 触发 | 镜像来源 | 信任根 | 防御 |
+|---|---|---|---|---|
+| **force_rebuild / 首建** | `force_rebuild=true` / tag 不存在 | 本次 `buildx build` 的构建产物（`@digest` 传下游） | 「仓库当前 checkout 的 Dockerfile」 | `@digest` 内容寻址 + 构建即所用（无 TOCTOU）；**无需 verify** |
+| **复用** | tag 已存在且非 force_rebuild | tag 上**已存在的外来镜像**（可能被投毒） | 「该镜像是否由可信 CI 构建」 | **provenance verify（signer/source=dev）**：无 dev keyless 签名者拒绝、fail loud |
+
+- **force_rebuild 为何无需 verify**：它不复用外来镜像，而是重新构建当前分支代码；digest 来自 buildx metadata、`build-firmware` 按 `@digest` 拉——GHCR 上该 digest 内容不可变，攻击者无法在 push 与 pull 之间替换；信任等价于「信任当前分支代码」。
+- **攻击者在自有 feature 分支 force_rebuild：拿不到 dev 代码执行，最坏是可用性 DoS**：改 Dockerfile → `tag=sha256(改后)` 与 dev tag 不同、不覆盖 dev；不改 Dockerfile → tag 与 dev 相同，会用 feature 签名的镜像覆盖该共享 tag（内容虽同源，但 attestation signer=feature），使后续 dev 复用 verify fail loud。
+- **真正的投毒面在复用**：具 `packages:write` 者**手动** `docker push` 恶意镜像到 `tag=sha256(dev Dockerfile)` → dev 的 `push(dev)` 复用会拉到它 → 由 verify（signer/source=dev）拦截（该镜像无 dev 分支 workflow OIDC 签发的 Sigstore attestation）。
+- **即便攻击者 force_rebuild 覆盖 dev 的 tag**（相同 Dockerfile）：其 attestation signer=feature ref → dev 复用 verify 因 signer≠dev 失败（**fail loud = DoS 报警，非代码执行**），dev 重签即恢复；攻击者伪造不了 dev 的 keyless 签名。
