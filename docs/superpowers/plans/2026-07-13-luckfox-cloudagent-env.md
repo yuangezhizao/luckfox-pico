@@ -4,7 +4,7 @@
 
 **Goal:** 用「配置即代码」为 luckfox-pico 添加 Cursor Cloud Agent 支持，使任何人从本分支起 Agent 即得到一致、可复现、开箱即可交叉编译出固件镜像的环境。
 
-**Architecture:** 以 `.cursor/environment.json` 的 Dockerfile 模式固化环境（纯 `build`、无 `install`）。**活动环境**（environment.json 引用的 `.cursor/Dockerfile`）为自建 `ubuntu:24.04`（贴合默认 Cloud Agent 与本机 24.04.4），从裸系统按官方《SDK 镜像编译》apt 清单 + buildroot 硬需依赖自装；**备选环境** `.cursor/Dockerfile.luckfox_pico` 为 Luckfox 官方唯一声明支持的 `luckfoxtech/luckfox_pico:1.0`（Ubuntu 22.04、依赖预装）。两者均 tag+digest 双锁定。编译不需 docker-in-docker：交叉工具链已随仓库内置，Agent 直接在容器内 `./build.sh` 即产出固件。
+**Architecture:** 以 `.cursor/environment.json` 的 Dockerfile 模式固化 SDK 编译环境，并在 `install` 阶段配置全局 grilling 技能。**活动环境**（environment.json 引用的 `.cursor/Dockerfile`）为自建 `ubuntu:24.04`（贴合默认 Cloud Agent 与本机 24.04.4），从裸系统按官方《SDK 镜像编译》apt 清单 + buildroot 硬需依赖自装；**备选环境** `.cursor/Dockerfile.luckfox_pico` 为 Luckfox 官方唯一声明支持的 `luckfoxtech/luckfox_pico:1.0`（Ubuntu 22.04、依赖预装）。两者均 tag+digest 双锁定。编译不需 docker-in-docker：交叉工具链已随仓库内置，Agent 直接在容器内 `./build.sh` 即产出固件。
 
 **Tech Stack:** Cursor Cloud Agent（environment.json / Dockerfile 模式）、Docker、Luckfox Pico SDK（`./build.sh` allsave）、buildroot 2023.02.6、kernel 5.10.160、内置交叉工具链 `arm-rockchip830-linux-uclibcgnueabihf`（gcc 8.3.0）；基线 Ubuntu 24.04（活动）/ 22.04（官方备选）。
 
@@ -14,7 +14,7 @@
 
 | 文件 | 责任 |
 | --- | --- |
-| `.cursor/environment.json` | Cloud Agent 环境入口：Dockerfile 模式（`{"build":{"dockerfile":"Dockerfile","context":".."}}`），纯 build、无 install |
+| `.cursor/environment.json` | Cloud Agent 环境入口：Dockerfile 模式负责 SDK 编译依赖；install 将固定 Git commit 的 grilling 技能写入 `$HOME/.cursor/skills/grilling/SKILL.md` |
 | `.cursor/Dockerfile` | **活动**环境：自建 `ubuntu:24.04`（tag+digest 双锁定）+ 官方 apt 清单 + buildroot 补齐（`wget patch bzip2 xz-utils perl gzip tar findutils sed`，**不含 which**）+ `curl`/`sudo`/`ca-certificates`/`locales` + git safe.directory；附「平台自动安装包」注释框 |
 | `.cursor/Dockerfile.luckfox_pico` | **备选**环境：官方镜像 `luckfoxtech/luckfox_pico:1.0`（Ubuntu 22.04、依赖预装）+ 补 `sudo curl vim less file htop` + git safe.directory；附「平台自动安装包」注释框 |
 | `AGENTS.md` | 给 Agent 的仓库说明：中文交互约定、仓库性质、活动/备选环境、非交互选板、构建/验证、编译污染提醒；编译实测数据引 spec §7 |
@@ -33,7 +33,7 @@
 ## Task 分解与完成情况
 
 ### Task 1：`.cursor/environment.json` + 两个 Dockerfile
-- **environment.json**：Dockerfile 模式（`build.dockerfile=Dockerfile`、`context=..`），纯 `build`、无 `install`——git「dubious ownership」由 Dockerfile 内 `git config --system --add safe.directory '*'` 一次性解决（`--system` 落镜像层、对所有用户生效）。
+- **environment.json**：Dockerfile 模式（`build.dockerfile=Dockerfile`、`context=..`）负责 SDK 编译依赖，install 负责全局 grilling 技能；固定 Git commit 的 HTTPS 下载写入 `$HOME/.cursor/skills/grilling/SKILL.md`。git「dubious ownership」仍由 Dockerfile 内 `git config --system --add safe.directory '*'` 一次性解决（`--system` 落镜像层、对所有用户生效）。
 - **活动 `.cursor/Dockerfile`**：`FROM ubuntu:24.04@sha256:4fbb8e6a…`，装官方 apt 清单 + buildroot 硬需 `wget patch bzip2 xz-utils perl gzip tar findutils sed` + `curl sudo ca-certificates locales`；**绝不写 `which`**（which 无独立实体包、由 debianutils 内置；24.04 上写它会装上虚包 `gnu-which` 徒增冗余、官方镜像 22.04 上则致 `E: Unable to locate package which`、apt 退出码 100）。
 - **备选 `.cursor/Dockerfile.luckfox_pico`**：`FROM luckfoxtech/luckfox_pico:1.0@sha256:915d4458…`，仅补基础镜像缺失项 `sudo curl vim less file htop`（SDK 编译依赖官方镜像已预装）。
 - ✅ **完成**：两镜像 `docker build` 均成功、tag+digest 双锁定；活动镜像 digest 与实测验证两板编译的镜像一致。
