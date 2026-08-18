@@ -255,7 +255,7 @@ buildroot **2023.02.6** 由随仓库跟踪的源码包 `sysdrv/tools/board/build
 
 | 文件 | 作用 | 关键点 |
 | --- | --- | --- |
-| `.cursor/environment.json` | Cloud Agent 环境定义 | Dockerfile 模式负责编译依赖；`install` 在启动前配置全局 grilling 技能，safe.directory 仍由 Dockerfile 的 `--system` 处理 |
+| `.cursor/environment.json` | Cloud Agent 环境定义 | Dockerfile 模式负责编译依赖；`install` 在创建 Environment Build 时配置全局 grilling 技能，成功的非草稿 Build 捕获磁盘状态并自动成为 active Build；草稿 Build 仅用于验证，须显式激活后才成为 active Build，后续 Agent 从该 Build 启动；safe.directory 仍由 Dockerfile 的 `--system` 处理 |
 | `.cursor/Dockerfile` | **当前活动**环境（自建 Ubuntu 24.04，environment.json 引用本文件） | `FROM ubuntu:24.04@sha256:4fbb8e6a…` + 官方 apt 清单 + `wget patch bzip2 xz-utils perl gzip tar findutils sed` + `curl` + `sudo`/`ca-certificates`/`locales` + git safe.directory（**不含 which**）；附「平台自动安装包」注释框 |
 | `.cursor/Dockerfile.luckfox_pico` | 备选环境（官方镜像 Ubuntu 22.04，官方支持） | `FROM luckfoxtech/luckfox_pico:1.0@sha256:915d4458…`（tag+digest 双锁定）+ 补 `sudo curl vim less file htop` + `git config --system --add safe.directory '*'`；附「平台自动安装包」注释框 |
 | `AGENTS.md` | 给 Agent 的仓库说明（精简） | 中文交互约定、仓库性质（验证=产出固件镜像、无长期服务、luckfox≠ESP-IDF）、活动 / 备选环境、工具链内置、非交互选板、构建 / 验证命令、编译污染提醒；编译实测数据见本 spec §7 |
@@ -274,7 +274,7 @@ A：为**开箱即用**——默认 Cloud Agent 与本机均为 24.04.4，活动
 A：**不能。** environment.json 的 schema 只有 snapshot/build/install/start/terminals，没有 model 字段。模型只能通过 UI 下拉 / Dashboard 默认 / Automations / API `model.id` 指定，且须为支持 Max Mode 的精选模型。
 
 **Q4：为什么 environment.json 使用 install？**
-A：SDK 编译依赖与 git「dubious ownership」仍在 Dockerfile 中处理；install 只在 Agent 开始前将固定版本的 grilling 技能写入 Cursor 全局技能目录，避免每次会话通过自然语言手工安装。该安装成功路径可重复执行，不引入 IMA 的凭据、远端更新或额外依赖。
+A：SDK 编译依赖与 git「dubious ownership」仍在 Dockerfile 中处理；install 在创建 Environment Build 时将固定版本的 grilling 技能写入 Cursor 全局技能目录，成功的非草稿 Build 捕获该磁盘状态并自动成为 active Build；草稿 Build 仅用于验证，须显式激活后才成为 active Build，后续 Agent 无需通过自然语言手工安装。该安装成功路径可重复执行，不引入 IMA 的凭据、远端更新或额外依赖。
 
 **Q5：编译要不要 docker-in-docker？**
 A：默认**不要**。编译只靠内置交叉工具链，直接在 Agent 容器里 `./build.sh` 即可。只有当你想在 Agent 内部再验证「官方 docker 镜像」这条路径时，才需要 dind（需 fuse-overlayfs + iptables-legacy + 手动 dockerd）。
@@ -360,10 +360,10 @@ Docker Hub 上仅 `1.0` 一个 tag（287MB，2023-11-11 发布后未更新），
 - **LUCKFOX 官方《Docker 环境下编译镜像》**（官方镜像编译，方法5 依据）：https://wiki.luckfox.com/zh/Luckfox-Pico-Ultra/Docker-Image-Build
 - **Cursor 官方《Cloud 环境设置 · 运行 Docker》**（Cloud Agent 内 dind：fuse-overlayfs + iptables-legacy）：https://cursor.com/cn/docs/cloud-agent/setup#docker
 - **参考 PR（配置即代码模板）**：ESP-Pocket2 #1 https://github.com/yuangezhizao/ESP-Pocket2/pull/1 ；WT9932P4-TINY #2 https://github.com/yuangezhizao/WT9932P4-TINY/pull/2
-- **grilling 技能来源**：https://github.com/mattpocock/skills/blob/2ab958093e83e0ec752e6c1c5932da465bf23e0c/skills/productivity/grilling/SKILL.md
+- **grilling 技能来源**：https://github.com/mattpocock/skills/blob/85f83d3fde1d3a90d5c9a657f6998c79a6c37308/skills/productivity/grilling/SKILL.md
 
 ## 13. 附录：环境约束与辅助工具
 
 - **以 dev 分支最新文件为准**：本分支基于主线 dev 最新状态；与参考 PR 涉及的同类文件（.cursor/*、AGENTS.md）若在 dev 上有更新，一律以 dev 最新为准（本次已核验 dev 无相关更新）。
-- **grilling 全局技能（不入库）**：environment.json 的 install 在 Agent 开始前将固定 Git commit 的 grilling 技能写入 `$HOME/.cursor/skills/grilling/SKILL.md`；该路径位于仓库外，不需要 gitignore，属于 Cloud Agent 环境配置的交付内容。
+- **grilling 全局技能（不入库）**：environment.json 的 install 在创建 Environment Build 时将固定 Git commit 的 grilling 技能写入 `$HOME/.cursor/skills/grilling/SKILL.md`，成功的非草稿 Build 捕获该磁盘状态并自动成为 active Build；草稿 Build 仅用于验证，须显式激活后才成为 active Build，后续 Agent 从该 Build 启动；该路径位于仓库外，不需要 gitignore，属于 Cloud Agent 环境配置的交付内容。
 - **Cloud Agent 模型指定**：.cursor/environment.json 无 model 字段；模型只能经 UI 模型下拉 / Dashboard 默认模型 / Automations / API 指定，且限"支持 Max Mode 的精选模型清单"（详见 §8 与 §11 QA）。
