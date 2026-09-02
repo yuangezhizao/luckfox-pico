@@ -3,7 +3,7 @@
 # 目标：把开发环境「代码化」，不依赖任何人的个人快照（Personal snapshot）；任何人从带本文件的分支起 Cloud Agent，都能得到可复现的交叉编译环境，让 `./build.sh` 开箱即用。
 #
 # 说明：
-# - Cloud Agent 本身就运行在「一个容器」里；本 Dockerfile 只是「声明这个容器长什么样」，并非 docker-in-docker。未来要装 Tailscale / cloudflared，直接在本文件里 apt 安装或下载二进制、运行时按官方 userspace 方式启动即可。
+# - Cloud Agent 本身就运行在「一个容器」里；本 Dockerfile 只是「声明这个容器长什么样」，并非 docker-in-docker。本仓安装 Tailscale，Agent Run 按 Spec §2.1 使用 kernel 模式；Cursor 官方 userspace 路径只作回退。
 # - 基于 ubuntu:24.04（贴合默认 Cloud Agent 与本机的 24.04.4 LTS）：从裸系统按官方《SDK 镜像编译》apt 清单 + buildroot 硬需自装 SDK 全部编译依赖。⚠️ 官方仅声明支持 Ubuntu 22.04，24.04 超出官方支持范围，但已实测 Pico Max 与 Ultra W 两板均编译成功（host gcc13/glibc2.39；目标产物与官方 22.04 镜像一致，因交叉工具链内置于仓库）。备选的官方 22.04 镜像见 .cursor/Dockerfile.luckfox_pico。
 # - ARM 交叉工具链 arm-rockchip830-linux-uclibcgnueabihf（gcc 8.3.0）已随 SDK 仓库内置于 tools/linux/toolchain/，build.sh 选板后自动加入 PATH，无需在镜像内安装。
 # - ubuntu:24.04 是 Ubuntu based，满足 Cursor computer use（Desktop）对 Debian/Ubuntu 的要求。
@@ -39,7 +39,7 @@ ENV TZ=Asia/Shanghai
 # - 编译依赖属「核心功能」：虽平台 Aptfile 已含 sudo/curl/ca-certificates/locales/xz-utils/findutils/gzip/tar 等，但为「不依赖官方镜像、也不依赖运行时平台行为」而在镜像层完整固化自列（保证构建可复现）。
 # - buildroot 硬需但官方 apt 清单遗漏：wget、patch（平台 Aptfile 亦不含）；缺则 rootfs 阶段报 "You must install wget / GNU patch"。
 # - 绝不写 which：which 无独立实体包（命令由 essential 包 debianutils 内置、基础镜像已自带）；ubuntu:24.04（universe 默认开启）上写它会解析到虚包 gnu-which 并安装成功（退出 0）、徒增冗余包，官方镜像 Ubuntu 22.04 上则报 "E: Unable to locate package which" 致退出码 100——两种情况都不该写。
-# - 不装 openssh-server（sshd）：CI 编译与 Cloud Agent 均不需被 SSH 登录（build.sh 无 ssh/sshd 调用、平台连容器走 exec-daemon 非 sshd），而装 openssh-server 会在 docker build 时经 postinst 生成 /etc/ssh/ssh_host_*_key、烘焙进 public 镜像层（host key 泄露：下游若用此镜像启 sshd 会共享同一可提取的主机身份、可 MITM，同 CVE-2025-32755 类）；故去掉 ssh 元包（其依赖 openssh-server）与 openssh-server、仅留 openssh-client（供 git SSH 提交签名等 client 用途）。⚠️ 与开发板无关：目标固件的 sshd 由 buildroot BR2_PACKAGE_OPENSSH（两 defconfig 均已启用）从源码交叉编译进 rootfs，不依赖本 host 镜像的 openssh-server。
+# - 公开 Dockerfile 层不安装 openssh-server：server 由 .cursor/install.sh 写入私有 Build 快照，避免公开镜像复用同一 host key。
 RUN apt-get update && apt-get install -y --no-install-recommends \
       git make gcc gcc-multilib g++-multilib module-assistant expect g++ gawk \
       texinfo libssl-dev bison flex fakeroot cmake unzip gperf autoconf \
@@ -47,7 +47,23 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       openssl openssh-client vim file cpio rsync curl \
       wget patch bzip2 xz-utils perl gzip tar findutils sed \
       sudo ca-certificates locales \
+      iproute2 procps jq tcpdump \
     && rm -rf /var/lib/apt/lists/*
+
+# Tailscale 使用官方 Ubuntu 24.04 Noble stable apt 仓库，不锁定版本；节点认证只在 Agent Run 的 start 阶段进行。
+RUN install -d -m 0755 /usr/share/keyrings \
+    && curl -fsSL https://pkgs.tailscale.com/stable/ubuntu/noble.noarmor.gpg \
+       -o /usr/share/keyrings/tailscale-archive-keyring.gpg \
+    && curl -fsSL https://pkgs.tailscale.com/stable/ubuntu/noble.tailscale-keyring.list \
+       -o /etc/apt/sources.list.d/tailscale.list \
+    && apt-get update \
+    && apt-get install -y tailscale \
+    && rm -rf /var/lib/apt/lists/*
+
+# Cursor 平台在运行时提供 ubuntu 用户；为 OpenSSH 登录后的提权固化免密 sudo，不在此镜像层安装 openssh-server。
+RUN printf '%s\n' 'ubuntu ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/ubuntu \
+    && chmod 0440 /etc/sudoers.d/ubuntu \
+    && visudo -cf /etc/sudoers.d/ubuntu
 
 # 允许对检出的工作区执行 git（避免 "detected dubious ownership" 报错）。
 RUN git config --system --add safe.directory '*'

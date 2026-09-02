@@ -14,12 +14,33 @@
 
 ### Cloud Agent 环境（Dockerfile 模式，配置即代码）
 
-- 环境由 **`.cursor/environment.json` + `.cursor/Dockerfile`** 定义，不依赖个人快照。解析优先级：仓库 `.cursor/environment.json` > 个人 saved environment > 团队 saved environment；故从带本配置的分支起 Cloud Agent 会自动使用本 Dockerfile。
+- 环境由 **`.cursor/environment.json` + `.cursor/Dockerfile` + `.cursor/install.sh` + `.cursor/start.sh`** 定义，不依赖个人快照。解析优先级：仓库 `.cursor/environment.json` > 个人 saved environment > 团队 saved environment；故从带本配置的分支起 Cloud Agent 会自动使用本 Dockerfile。`install` / `start` 字段只调用 `bash .cursor/install.sh` 与 `bash .cursor/start.sh`。
 - **当前活动 = 自建 Ubuntu 24.04**（`.cursor/Dockerfile`：`FROM ubuntu:24.04` + SDK 全部编译依赖，tag+digest 双锁定）：贴合默认 agent / 本机的 24.04.4、开箱即编；超出官方仅支持的 22.04，但实测两板可编。
 - **备选 = 官方镜像**（`.cursor/Dockerfile.luckfox_pico`：`FROM luckfoxtech/luckfox_pico:1.0`，Ubuntu 22.04，依赖预装、官方支持）：追求官方支持或规避 24.04 兼容风险时，把 `environment.json` 的 `dockerfile` 改指向它即可。
 - ARM 交叉工具链 `arm-rockchip830-linux-uclibcgnueabihf`（gcc 8.3.0）**已随仓库内置**于 `tools/linux/toolchain/`，`build.sh` 选板后自动加入 `PATH`，**无需安装**。
 - **Buildroot 下载包 `dl/` 不随仓库分发**：`sysdrv/source/buildroot` 已被 gitignore（`build.sh clean` 亦整目录删除），故**全新 / clean 后**构建 rootfs 需联网下载全部 buildroot 包（Pico Max 约 105 个 / Ultra W 约 153 个，含 mpv/madplay/sdl2 等多媒体包）；仅 in-tree 的 uboot / kernel 可离线（见下）。
 - 桌面 / VNC / 字体等由 Cursor 平台启动时按 `/usr/local/share/vnc-desktop.Aptfile` 自动安装（本仓纯交叉编译、用不上，但平台仍会装）；**无需 docker-in-docker**——环境本身就是容器。
+
+### Tailscale 远程接入
+
+- 活动 Cloud Agent 在每个 Agent Run 由 `bash .cursor/start.sh` 启动 Tailscale **kernel 模式**（存在 `tailscale0`，不带 `--tun=userspace-networking`）；Cursor 官方 userspace 方案仅作兼容回退。
+- 必需 Cursor Secrets：`TAILSCALE_AUTHKEY`（Reusable、非 Ephemeral）和 `SSH_AUTHORIZED_KEYS`；不得写入仓库。Auth key 最长 90 天，用户身份节点的 node key 默认 180 天，重新认证前需轮换 Auth key 或提前关闭节点 key expiry。
+- 节点名为 `cursor-agent-<bcId UUID 第一段>`。`bcId` 优先取 `CURSOR_CONVERSATION_ID`；平台 `start` 未注入该变量时改读 `/run/agent-store-fuse/self-store-id`（与 bcId 相同）。该 fuse 文件可能晚于平台 `start` 出现，此时开机自动 start 会失败，在 Agent 会话中再执行 `bash .cursor/start.sh` 即可加入 tailnet。实际名称与 Tailscale IP 以 `tailscale status` 为准。
+- OpenSSH 使用 `ubuntu` 公钥登录并可免密 sudo；Tailscale SSH 禁用。SSH 和 noVNC 分别使用 `<hostname>:22`、`http://<hostname>:26058`；TigerVNC 使用 `<hostname>:5901`。
+- Agent 内显式访问 tailnet HTTP(S) 服务可设置 `HTTP_PROXY=http://localhost:1054/`、`HTTPS_PROXY=http://localhost:1054/` 或 `ALL_PROXY=socks5h://localhost:1055/`；Mac 也可按需把 `<hostname>:1054` / `<hostname>:1055` 作为 HTTP / SOCKS5 代理。
+- 所有 Agent 宣告 `172.30.0.0/24`，但同一时间只在 Tailscale Admin Console 批准一个 Agent 的该路由；并行 Agent 必须用各自 hostname/Tailscale IP 访问，不用 `172.30.0.2` 区分。
+- 节点同时宣告 exit node；Cursor 官方不支持此用途，当前只要求 Admin Console 显示并启用该能力，不承诺实际转发成功。
+
+| 端口 | 绑定/路径 | 用途与边界 |
+| --- | --- | --- |
+| 22 | `0.0.0.0` | OpenSSH，tailnet 天然可达，不配置 Serve |
+| 1054/1055 | `127.0.0.1` + Serve | Tailscale HTTP/SOCKS5 代理，Agent 本地及 Mac 按需使用 |
+| 5901 | `127.0.0.1` + Serve | TigerVNC，无密码，仅供获准 tailnet 设备使用 |
+| 26058 | `0.0.0.0` | noVNC，tailnet 天然可达，不配置 Serve |
+| 2375、26053–26055、26500、50052 | `0.0.0.0`/`*` | Cursor/Docker 平台端口，kernel 模式下天然可达；当前不配置 ACL，接受 Spec §2.8 的风险 |
+| Peer API 与 WireGuard UDP | Tailscale IP/动态端口 | 端口会变化，不写死到配置或检查脚本 |
+
+完整设计、官方支持边界、端口实测和 V1–V10 验收见 `docs/superpowers/specs/2026-08-30-luckfox-cloudagent-tailscale-design.md`。
 
 ### 选板（非交互）
 
