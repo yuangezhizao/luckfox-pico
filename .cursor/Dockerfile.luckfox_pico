@@ -3,7 +3,7 @@
 # 目标：把开发环境「代码化」，不依赖任何人的个人快照（Personal snapshot）；任何人从带本文件的分支起 Cloud Agent，都能得到与 Luckfox 官方一致、可复现的交叉编译环境，并让 `./build.sh` 开箱即用。
 #
 # 说明：
-# - Cloud Agent 本身就运行在「一个容器」里；本 Dockerfile 只是「声明这个容器长什么样」，并非 docker-in-docker。未来要装 Tailscale / cloudflared，直接在本文件里 apt 安装或下载二进制、运行时按官方 userspace 方式启动即可。
+# - Cloud Agent 本身就运行在「一个容器」里；本 Dockerfile 只是「声明这个容器长什么样」，并非 docker-in-docker。本仓安装 Tailscale，Agent Run 按 Spec §2.1 使用 kernel 模式；Cursor 官方 userspace 路径只作回退。
 # - 基于 Luckfox 官方镜像 luckfoxtech/luckfox_pico:1.0（Ubuntu 22.04）：官方《Docker 环境下编译镜像》即用此镜像，已内置 SDK 编译所需全部 apt 依赖（gcc/g++ multilib、bison、flex、device-tree-compiler、libncurses5-dev、cmake、python3 等）。这是官方唯一明确支持的编译环境（Ubuntu 22.04 x86_64）。
 # - ARM 交叉工具链 arm-rockchip830-linux-uclibcgnueabihf（gcc 8.3.0）已随 SDK 仓库内置于 tools/linux/toolchain/，build.sh 选板后自动加入 PATH，无需在镜像内安装。
 # - 官方镜像是 Ubuntu based，满足 Cursor computer use（Desktop）对 Debian/Ubuntu 的要求。
@@ -11,9 +11,9 @@
 # - FROM 同时锁定 tag 与 digest：tag（1.0）便于人读，digest 保证镜像内容字节级不可变（同一 tag 可被重推、digest 不会）。更新镜像版本时需同步更新该 digest（获取方式：docker buildx imagetools inspect luckfoxtech/luckfox_pico:1.0；注：Docker Hub 上该仓库目前仅 1.0 一个 tag、2023-11-11 后未更新）。
 FROM luckfoxtech/luckfox_pico:1.0@sha256:915d44588085826cbeda4b969dbbe7d5e54bf779ba36cda3c5072ee9533e0417
 
-# ┌─ 平台会「自动安装」的包（无需在本文件重复安装）──────────────────────────────
+# ┌─ 平台会「自动安装」的包 ───────────────────────────────────────────────────
 # │ Cursor 每次启动都会跑桌面初始化，按容器内 /usr/local/share/vnc-desktop.Aptfile
-# │ 用 `apt-get install --no-install-recommends` 安装下列（实测 sha256=819987b7…，与本仓 2026-07-14 环境一致）：
+# │ 用 `apt-get install --no-install-recommends` 安装下列（实测 sha256=819987b7…，与本仓 2026-09-06 环境一致）：
 # │   VNC     : tigervnc-standalone-server tigervnc-common tigervnc-tools
 # │   XFCE    : xfce4 xfce4-terminal xfce4-settings thunar
 # │   X11     : x11-utils x11-xserver-utils xdg-utils xdotool xclip procps
@@ -27,17 +27,34 @@ FROM luckfoxtech/luckfox_pico:1.0@sha256:915d44588085826cbeda4b969dbbe7d5e54bf77
 # │   资产依赖: bash ca-certificates coreutils curl findutils gzip tar
 # │   浏览器  : google-chrome-stable（单独脚本 install-google-chrome 安装）
 # │ 另外平台还会：把 gh 软链到 /usr/local/bin/gh、配置 git 身份与 SSH 提交签名、每次启动 git clean -fd 并重建 /opt/cursor/artifacts。
-# │ ⚠️ 本仓是纯交叉编译 SDK、不用桌面 computer use，但平台仍会装上述包；维护提示（清单实测 2026-07-14）：若平台不再自动装致编译/工具异常，把缺的项补进下面 apt。
+# │ ⚠️ 本仓是纯交叉编译 SDK、不用桌面 computer use，但平台仍会装上述包。下列只作 Cloud Agent 运行时记录，不作为本文件 apt 取舍依据。
 # └──────────────────────────────────────────────────────────────────────────────
 
-# 只安装「基础镜像缺失、或 Cursor 要求保底」的包（2026-07-12 于该镜像实测；SDK 编译依赖已由官方镜像预装、无需重复）：
-# - sudo     : Cursor 官方要求 Dockerfile 具备 git+sudo；实测镜像已含 git，仅缺 sudo（虽平台 Aptfile 也含 sudo，此处保底自装）。
-# - curl     : 实测镜像缺 curl。buildroot 下载全程用 wget；curl 仅供 mirror_select 于构建初测速选最快镜像——缺 curl 会致测速失败、主镜像站点(BR2_PRIMARY_SITE)为空、各包回落到上游默认站点(偏慢)。补 curl 可恢复镜像测速。
-# - 开发 CLI : vim less file htop —— 便于容器内排查（可选）。
+# apt 取舍只看当前 FROM digest 的 dpkg：不在 FROM 则显式安装，已在 FROM 则不写。该官方镜像没有公布与 digest 绑定的包清单。2026-09-06 对该 digest 执行 docker run --rm --entrypoint dpkg-query luckfoxtech/luckfox_pico:1.0@sha256:915d44588085826cbeda4b969dbbe7d5e54bf779ba36cda3c5072ee9533e0417 -W（amd64，366 个包）：SDK 官方 apt 清单、wget/patch、ca-certificates、procps、vim/less/file、openssh-server 已在 FROM；sudo/curl/locales/iproute2/jq/tcpdump/htop/neofetch 不在。
+# - sudo / curl / locales：FROM 没有。缺 curl 时 buildroot 镜像测速失败、主镜像站点为空、各包回落上游默认站点。
+# - iproute2 / jq / tcpdump：`ss`、JSON 摘要、V10 抓包；FROM 没有。procps 已在 FROM，不重复。
+# - htop / neofetch：排查 CLI。vim/less/file 已在 FROM，不重复。neofetch 在 jammy universe；本 RUN 带 --no-install-recommends，避免拉上 imagemagick 等推荐包。
+# - 公开 Dockerfile 层不安装 openssh-server：FROM 已有；活动镜像路径由 .cursor/install.sh 写入私有 Build 快照，本备选不在公开层再装一遍。
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      sudo \
-      curl vim less file htop \
+      sudo curl locales \
+      htop neofetch \
+      iproute2 jq tcpdump \
     && rm -rf /var/lib/apt/lists/*
+
+# Tailscale 使用官方 Ubuntu 22.04 Jammy stable apt 仓库，不锁定版本；节点认证只在 Agent Run 的 start 阶段进行。本层与 SDK/工具 RUN 一样带 --no-install-recommends。
+RUN install -d -m 0755 /usr/share/keyrings \
+    && curl -fsSL https://pkgs.tailscale.com/stable/ubuntu/jammy.noarmor.gpg \
+       -o /usr/share/keyrings/tailscale-archive-keyring.gpg \
+    && curl -fsSL https://pkgs.tailscale.com/stable/ubuntu/jammy.tailscale-keyring.list \
+       -o /etc/apt/sources.list.d/tailscale.list \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends tailscale \
+    && rm -rf /var/lib/apt/lists/*
+
+# Cursor 平台在运行时提供 ubuntu 用户；为 OpenSSH 登录后的提权固化免密 sudo，不在此镜像层安装 openssh-server。
+RUN printf '%s\n' 'ubuntu ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/ubuntu \
+    && chmod 0440 /etc/sudoers.d/ubuntu \
+    && visudo -cf /etc/sudoers.d/ubuntu
 
 # 允许对检出的工作区执行 git（避免 "detected dubious ownership" 报错）。
 RUN git config --system --add safe.directory '*'
