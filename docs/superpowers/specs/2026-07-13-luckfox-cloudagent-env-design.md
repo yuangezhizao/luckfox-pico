@@ -44,9 +44,48 @@ Cursor Cloud Agent 支持两种环境定义方式：
 
 ### 2.3 为何默认不采用 dind（Docker-in-Docker）
 
-编译本身**不需要** Docker：`./build.sh` 是纯粹的交叉编译脚本，工具链已内置。因此默认路径（官方镜像 / 自建镜像）都是「把编译依赖直接装进 Agent 运行的那个容器」，Agent 直接在容器里 `./build.sh` 即可，**无需在容器内再套一层 Docker**。
+编译本身**不需要** Docker：`./build.sh` 是纯粹的交叉编译脚本，工具链已内置。因此默认路径（官方镜像 / 自建镜像）都是「把编译依赖直接装进 Agent 运行的那个容器」，Agent 直接在容器里 `./build.sh` 即可，**无需在容器内再套一层 Docker**，也**禁止**把 Docker 引擎写入本仓 `.cursor/Dockerfile` / `.cursor/Dockerfile.luckfox_pico`。
 
-dind 只在一种情况下需要：当你想在 Agent 内**验证「官方 docker 镜像」这条路径本身**（即在 Agent 里 `docker run luckfoxtech/luckfox_pico:1.0` 再编译）时。此时才需要在 Cloud Agent 内跑 Docker，其代价见 §8 与 §9。因此 dind 被定位为「可选的验证手段」，而非默认架构。
+Cloud Agent **自己已经是一层容器**。在其中再装 Docker 是嵌套容器，不能按宿主机默认的 overlay2 + iptables-nft 安装。下列情形才在**当前 VM** 临时安装 Docker（用完不提交进仓库）：在 Agent 内 `docker run luckfoxtech/luckfox_pico:1.0` 验证官方镜像编译路径；或对锁定 digest 执行 `docker run --rm --entrypoint dpkg-query <image@digest> -W` 复核 FROM 包清单。
+
+#### 临时安装嵌套 Docker（Ubuntu 24.04 Noble）
+
+依据 Cursor [《云端环境设置 · 运行 Docker》](https://cursor.com/cn/docs/cloud-agent/setup#running-docker)。嵌套容器需要 `fuse-overlayfs`（内层无法稳定使用内核 overlay2）、`iptables-legacy`（嵌套 netns 里 nftables NAT 常失败），以及钉死的引擎版本（避免最新 `docker-ce` 改存储/iptables 行为）。
+
+前置：`/dev/fuse` 必须存在。Cloud Agent 无完整 systemd，apt postinst 的 `policy-rc.d` 会拦住 docker daemon 自动启动，装完后必须显式 `service docker start`，不可依赖 postinst。
+
+`fuse-overlayfs` 依赖 `fuse3`。Cloud Agent 上若已有 `/etc/fuse.conf`（脚本或先前包创建），`fuse3` 会在 conffile 提示处等待 stdin。仅设置 `DEBIAN_FRONTEND=noninteractive` **不够**：围栏里的 `apt-get install` 会以 **exit 100** 中断（`dpkg: error processing package fuse3 (--configure): end of file on stdin at conffile prompt`），随后 `fuse-overlayfs depends on fuse3` 且 `fuse3 is not configured yet`。必须给 dpkg `--force-confold`（保留现有 `fuse.conf`）。带该选项的一次安装：
+
+```bash
+install -m 0755 -d /etc/apt/keyrings
+curl --retry 3 --retry-delay 5 -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+chmod a+r /etc/apt/keyrings/docker.gpg
+echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null
+apt-get update
+DEBIAN_FRONTEND=noninteractive apt-get install -y -o Dpkg::Options::=--force-confold \
+  docker-ce=5:28.5.2-1~ubuntu.24.04~noble \
+  docker-ce-cli=5:28.5.2-1~ubuntu.24.04~noble \
+  containerd.io \
+  docker-buildx-plugin \
+  docker-compose-plugin \
+  fuse-overlayfs
+mkdir -p /etc/docker
+printf '%s\n' '{' '  "storage-driver": "fuse-overlayfs"' '}' > /etc/docker/daemon.json
+apt-get install -y iptables
+update-alternatives --set iptables /usr/sbin/iptables-legacy
+update-alternatives --set ip6tables /usr/sbin/ip6tables-legacy
+service docker start
+```
+
+若复制了未带 `--force-confold` 的旧围栏、apt 已 exit 100，不要重跑整段 `apt-get install`；先恢复未配置的包，再继续写 `daemon.json`、切 iptables-legacy 并 `service docker start`：
+
+```bash
+DEBIAN_FRONTEND=noninteractive dpkg --force-confold --configure fuse3
+DEBIAN_FRONTEND=noninteractive dpkg --configure fuse-overlayfs
+apt-get -f install -y
+```
+
+就绪判据：`docker info` 显示 `Storage Driver: fuse-overlayfs`，且 `docker --version` 为 28.5.2。不得采用官方片段中的固定用户密码，也不得把该片段的 sshd / `chpasswd` 复制进本仓。
 
 ## 3. 需求
 
@@ -76,7 +115,7 @@ dind 只在一种情况下需要：当你想在 Agent 内**验证「官方 docke
 - **Dockerfile 模式**满足 N1/N2/N4：环境即代码。
 - **活动基底 = 自建 Ubuntu 24.04**（`.cursor/Dockerfile`）：为开箱贴合默认 Cloud Agent 与本机（均 24.04.4），从裸系统自装 SDK 依赖。**官方镜像 `luckfoxtech/luckfox_pico:1.0`（Ubuntu 22.04，`.cursor/Dockerfile.luckfox_pico`）保留为受官方支持的备选**——它是 Luckfox 唯一声明支持的编译环境（依赖预装 gcc11/glibc2.35）。取舍见 §4.5/§5：24.04 超出官方支持但实测可编、贴合默认环境；需要官方支持时把 environment.json 的 `dockerfile` 改指向备选即可。（关于 N3「保留官方支持环境、随时可切」：本仓在「开箱一致」与「官方支持」之间选择了前者作为活动、后者作为随时可切的备选。）
 - environment.json 的 `build` 继续只引用 Dockerfile；编译依赖与 git「dubious ownership」均由镜像层解决，后者通过 `git config --system --add safe.directory '*'` 对所有用户生效。
-- environment.json 的 `install` 只配置全局 grilling 技能，不参与 SDK 编译依赖安装：使用固定 Git commit 的 HTTPS URL 写入 `$HOME/.cursor/skills/grilling/SKILL.md`，通过 `curl` 的协议、TLS、重定向、重试与时限参数保持成功路径幂等。
+- environment.json 的 `install` 为 `bash .cursor/install.sh`。grilling 技能下载不参与 SDK 编译依赖安装：使用固定 Git commit 的 HTTPS URL 写入 `$HOME/.cursor/skills/grilling/SKILL.md`，通过 `curl` 的协议、TLS、重定向、重试与时限参数保持成功路径幂等，现位于该脚本。脚本另在 Build 期以 `DEBIAN_FRONTEND=noninteractive` 与 dpkg `--force-confold` 安装 `openssh-server`（不进公开 Dockerfile），无 stamp 时旋转 host key；OpenSSH / host key 约束见 [`2026-08-30` §2.3–§2.4](2026-08-30-luckfox-cloudagent-tailscale-design.md)。
 - **范围决策**：不配置 IMA，其用户凭据、服务端远端更新指引和额外运行时依赖不符合最小 Cloud Agent 环境目标。grilling 技能下载依赖 `raw.githubusercontent.com` 可访问，且按决策不增加 SHA-256 校验、临时文件或重命名恢复机制。
 
 **grilling 技能下载参数：**
@@ -248,14 +287,14 @@ buildroot **2023.02.6** 由随仓库跟踪的源码包 `sysdrv/tools/board/build
 | grilling 技能下载 | 新机器或缓存失效时需访问 `raw.githubusercontent.com`；按决策不做独立内容摘要校验且直接覆盖目标文件 | `curl` 限制为 HTTPS、最多 3 次重定向、最多 3 次重试与 120 秒重试决策窗口；受限 egress 显式放行该域名 |
 | 24.04（活动 / 路径1 / 3）非官方支持 | 理论上环境相关风险略高 | 已实测两板可编、产物与官方功能预期一致（未板上验证）；如需官方支持可一键切备选官方 22.04 镜像（`.cursor/Dockerfile.luckfox_pico`） |
 | 自建镜像依赖清单易漏 | 官方清单漏 wget/patch，且 which 是陷阱 | 在 spec/plan/`.cursor/Dockerfile`（自建 ubuntu24）中固化正确清单与注释 |
-| 在 Agent 内跑 docker 成本 | dind 需 `apt install docker.io` + `fuse-overlayfs` 存储驱动 + `iptables-legacy` + 手动 `dockerd`（Cloud Agent 无 systemd） | 默认不 dind；仅在需验证「官方镜像路径」时启用 |
+| 在 Agent 内跑 docker 成本 | 嵌套容器须钉死 `docker-ce=5:28.5.2-1~ubuntu.24.04~noble` + `fuse-overlayfs` + `iptables-legacy` + 显式 `service docker start`（见 §2.3）；`fuse3` 改 `/etc/fuse.conf` 时仅 `DEBIAN_FRONTEND=noninteractive` 会 exit 100，须 `--force-confold`；`policy-rc.d` 拦住 postinst 自动启动。默认不写入本仓 Dockerfile | 默认不 dind；仅在验证官方镜像路径或复核 FROM `dpkg-query` 时于当前 VM 临时安装 |
 | 上游删除/变更基础镜像 | 供应链风险 | digest 锁定；必要时可切自建镜像路径 |
 
 ## 10. 交付物清单（Deliverables）
 
 | 文件 | 作用 | 关键点 |
 | --- | --- | --- |
-| `.cursor/environment.json` | Cloud Agent 环境定义 | Dockerfile 模式负责编译依赖；`install` 在创建 Environment Build 时配置全局 grilling 技能，成功的非草稿 Build 捕获磁盘状态并自动成为 active Build；草稿 Build 仅用于验证，须显式激活后才成为 active Build，后续 Agent 从该 Build 启动；safe.directory 仍由 Dockerfile 的 `--system` 处理 |
+| `.cursor/environment.json` | Cloud Agent 环境定义 | Dockerfile 模式负责编译依赖；`install` 为 `bash .cursor/install.sh`（grilling 下载见 §4.1；`openssh-server` 进私有 Build 快照，无 stamp 时旋转 host key，约束见 [`2026-08-30` §2.3–§2.4](2026-08-30-luckfox-cloudagent-tailscale-design.md)）；成功的非草稿 Build 捕获磁盘状态并自动成为 active Build；草稿 Build 仅用于验证，须显式激活后才成为 active Build，后续 Agent 从该 Build 启动；safe.directory 仍由 Dockerfile 的 `--system` 处理 |
 | `.cursor/Dockerfile` | **当前活动**环境（自建 Ubuntu 24.04，environment.json 引用本文件） | `FROM ubuntu:24.04@sha256:4fbb8e6a…` + 官方 apt 清单 + `wget patch bzip2 xz-utils perl gzip tar findutils sed` + `curl` + `sudo`/`ca-certificates`/`locales` + git safe.directory（**不含 which**）；附「平台自动安装包」注释框 |
 | `.cursor/Dockerfile.luckfox_pico` | 备选环境（官方镜像 Ubuntu 22.04，官方支持） | `FROM luckfoxtech/luckfox_pico:1.0@sha256:915d4458…`（tag+digest 双锁定）+ 补 `sudo curl vim less file htop` + `git config --system --add safe.directory '*'`；附「平台自动安装包」注释框 |
 | `AGENTS.md` | 给 Agent 的仓库说明（精简） | 中文交互约定、仓库性质（验证=产出固件镜像、无长期服务、luckfox≠ESP-IDF）、活动 / 备选环境、工具链内置、非交互选板、构建 / 验证命令、编译污染提醒；编译实测数据见本 spec §7 |
@@ -274,10 +313,10 @@ A：为**开箱即用**——默认 Cloud Agent 与本机均为 24.04.4，活动
 A：**不能。** environment.json 的 schema 只有 snapshot/build/install/start/terminals，没有 model 字段。模型只能通过 UI 下拉 / Dashboard 默认 / Automations / API `model.id` 指定，且须为支持 Max Mode 的精选模型。
 
 **Q4：为什么 environment.json 使用 install？**
-A：SDK 编译依赖与 git「dubious ownership」仍在 Dockerfile 中处理；install 在创建 Environment Build 时将固定版本的 grilling 技能写入 Cursor 全局技能目录，成功的非草稿 Build 捕获该磁盘状态并自动成为 active Build；草稿 Build 仅用于验证，须显式激活后才成为 active Build，后续 Agent 无需通过自然语言手工安装。该安装成功路径可重复执行，不引入 IMA 的凭据、远端更新或额外依赖。
+A：SDK 编译依赖与 git「dubious ownership」仍在 Dockerfile 中处理。当前 `environment.json` 的 `install` 为 `bash .cursor/install.sh`：grilling 下载仍用 §4.1 参数（现位于该脚本）；脚本另在 Build 期以 `DEBIAN_FRONTEND=noninteractive` 与 dpkg `--force-confold` 安装 `openssh-server`（不进公开 Dockerfile），无 stamp 时旋转 host key。OpenSSH / host key 约束见 [`2026-08-30` §2.3–§2.4](2026-08-30-luckfox-cloudagent-tailscale-design.md)。成功的非草稿 Build 捕获该磁盘状态并自动成为 active Build；草稿 Build 仅用于验证，须显式激活后才成为 active Build。该安装成功路径可重复执行，不引入 IMA 的凭据、远端更新或额外依赖。
 
 **Q5：编译要不要 docker-in-docker？**
-A：默认**不要**。编译只靠内置交叉工具链，直接在 Agent 容器里 `./build.sh` 即可。只有当你想在 Agent 内部再验证「官方 docker 镜像」这条路径时，才需要 dind（需 fuse-overlayfs + iptables-legacy + 手动 dockerd）。
+A：默认**不要**，且禁止把 Docker 引擎写入本仓 Dockerfile。编译只靠内置交叉工具链，直接在 Agent 容器里 `./build.sh` 即可。仅当需要在 Agent 内 `docker run` 官方 luckfox 镜像、或对锁定 digest 做 `dpkg-query` 时，才在**当前 VM** 按 §2.3 临时安装嵌套 Docker（钉死 docker-ce 28.5.2、fuse-overlayfs、iptables-legacy、dpkg `--force-confold` 处理 fuse3 `/etc/fuse.conf`、显式 `service docker start`）。
 
 **Q6：三条路径产物会不会不一样？**
 A：**功能预期一致，但非字节一致，且未做板上验证**。目标固件由内置交叉工具链（gcc8.3.0）/ kernel5.10.160 / buildroot2023.02.6 同一份源码编出，宿主 host gcc 只参与构建期 PC 工具、不进入目标产物，故可**推断**功能相同——但本次仅验证到「6 组均成功编译产出 + 组件版本一致」，**未在实体板上启动 / 跑外设回归**，「功能一致」是基于相同构建输入的推断而非实测。另外 buildroot / U-Boot 会嵌入构建时间戳等，故同板不同次 / 不同环境的 `update.img` 等 sha256 不同（要字节可复现需另行固定 `SOURCE_DATE_EPOCH` 等，本 SDK 未做）。
@@ -365,5 +404,5 @@ Docker Hub 上仅 `1.0` 一个 tag（287MB，2023-11-11 发布后未更新），
 ## 13. 附录：环境约束与辅助工具
 
 - **以 dev 分支最新文件为准**：本分支基于主线 dev 最新状态；与参考 PR 涉及的同类文件（.cursor/*、AGENTS.md）若在 dev 上有更新，一律以 dev 最新为准（本次已核验 dev 无相关更新）。
-- **grilling 全局技能（不入库）**：environment.json 的 install 在创建 Environment Build 时将固定 Git commit 的 grilling 技能写入 `$HOME/.cursor/skills/grilling/SKILL.md`，成功的非草稿 Build 捕获该磁盘状态并自动成为 active Build；草稿 Build 仅用于验证，须显式激活后才成为 active Build，后续 Agent 从该 Build 启动；该路径位于仓库外，不需要 gitignore，属于 Cloud Agent 环境配置的交付内容。
+- **grilling 全局技能（不入库）**：`environment.json` 的 `install` 为 `bash .cursor/install.sh`，其中将固定 Git commit 的 grilling 技能写入 `$HOME/.cursor/skills/grilling/SKILL.md`；脚本另装 `openssh-server`（`DEBIAN_FRONTEND=noninteractive` 与 dpkg `--force-confold`），无 stamp 时旋转 host key（见 [`2026-08-30` §2.3–§2.4](2026-08-30-luckfox-cloudagent-tailscale-design.md)）。成功的非草稿 Build 捕获该磁盘状态并自动成为 active Build；草稿 Build 仅用于验证，须显式激活后才成为 active Build，后续 Agent 从该 Build 启动；grilling 路径位于仓库外，不需要 gitignore，属于 Cloud Agent 环境配置的交付内容。
 - **Cloud Agent 模型指定**：.cursor/environment.json 无 model 字段；模型只能经 UI 模型下拉 / Dashboard 默认模型 / Automations / API 指定，且限"支持 Max Mode 的精选模型清单"（详见 §8 与 §11 QA）。
