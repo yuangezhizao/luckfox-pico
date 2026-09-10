@@ -1,8 +1,9 @@
 {
+  "user": "ubuntu",
   "build": {
     "dockerfile": "Dockerfile",
     "context": ".."
   },
-  "install": "bash .cursor/install.sh",
-  "start": "bash .cursor/start.sh"
+  "install": "sudo -n -E bash .cursor/install.sh",
+  "start": "sudo -n -E bash .cursor/start.sh"
 }
