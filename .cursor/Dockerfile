@@ -71,3 +71,6 @@ RUN printf '%s\n' 'ubuntu ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/ubuntu \
 
 # 允许对检出的工作区执行 git（避免 "detected dubious ownership" 报错）。
 RUN git config --system --add safe.directory '*'
+
+# Cloud Agent 默认运行用户。须写在 docker build 的全部 RUN 之后：USER 会改变后续 RUN 的身份，构建期没有 sudo -n -E；JSON 的 sudo -n -E 只用于镜像建成后的 install/start。
+USER ubuntu
