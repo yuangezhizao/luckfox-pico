@@ -71,3 +71,6 @@ RUN printf '%s\n' 'ubuntu ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/ubuntu \
 
 # 允许对检出的工作区执行 git（避免 "detected dubious ownership" 报错）。
 RUN git config --system --add safe.directory '*'
+
+# 镜像默认运行用户。须在全部 RUN 之后，否则后续 apt RUN 会以非 root 失败。
+USER ubuntu
