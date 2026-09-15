@@ -14,7 +14,7 @@
 
 ### Cloud Agent 环境（Dockerfile 模式，配置即代码）
 
-- 环境由 **`.cursor/environment.json` + `.cursor/Dockerfile` + `.cursor/install.sh` + `.cursor/start.sh`** 定义，不依赖个人快照。解析优先级：仓库 `.cursor/environment.json` > 个人 saved environment > 团队 saved environment；故从带本配置的分支起 Cloud Agent 会自动使用本 Dockerfile。`install` / `start` 字段只调用 `bash .cursor/install.sh` 与 `bash .cursor/start.sh`。
+- 环境由 **`.cursor/environment.json` + `.cursor/Dockerfile` + `.cursor/install.sh` + `.cursor/start.sh`** 定义，不依赖个人快照。解析优先级：仓库 `.cursor/environment.json` > 个人 saved environment > 团队 saved environment；故从带本配置的分支起 Cloud Agent 会自动使用本 Dockerfile。默认会话用户为 `ubuntu`（`HOME=/home/ubuntu`）；编译不要额外 `sudo`。
 - **当前活动 = 自建 Ubuntu 24.04**（`.cursor/Dockerfile`：`FROM ubuntu:24.04` + SDK 全部编译依赖，tag+digest 双锁定）：贴合默认 agent / 本机的 24.04.4、开箱即编；超出官方仅支持的 22.04，但实测两板可编。
 - **备选 = 官方镜像**（`.cursor/Dockerfile.luckfox_pico`：`FROM luckfoxtech/luckfox_pico:1.0`，Ubuntu 22.04，依赖预装、官方支持）：追求官方支持或规避 24.04 兼容风险时，把 `environment.json` 的 `dockerfile` 改指向它即可。该备选同样安装浮动稳定版 Tailscale（Jammy 仓库）与 `ubuntu` 免密 sudo；公开层不安装 `openssh-server`（官方 FROM 已含），由共享 `install.sh` 装包（已装则跳过）并在无 `/etc/ssh/.cursor-hostkeys-generated` 时旋转 host key 写入私有 Build 快照。
 - ARM 交叉工具链 `arm-rockchip830-linux-uclibcgnueabihf`（gcc 8.3.0）**已随仓库内置**于 `tools/linux/toolchain/`，`build.sh` 选板后自动加入 `PATH`，**无需安装**。
