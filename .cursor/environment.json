@@ -1,6 +1,6 @@
 {
   "build": {
-    "dockerfile": "Dockerfile",
+    "dockerfile": "Dockerfile.luckfox_pico",
     "context": ".."
   },
   "install": "sudo -n -E bash .cursor/install.sh",
