@@ -30,15 +30,18 @@ FROM luckfoxtech/luckfox_pico:1.0@sha256:915d44588085826cbeda4b969dbbe7d5e54bf77
 # │ ⚠️ 本仓是纯交叉编译 SDK、不用桌面 computer use，但平台仍会装上述包。下列只作 Cloud Agent 运行时记录，不作为本文件 apt 取舍依据。
 # └──────────────────────────────────────────────────────────────────────────────
 
-# apt 取舍只看当前 FROM digest 的 dpkg：不在 FROM 则显式安装，已在 FROM 则不写。该官方镜像没有公布与 digest 绑定的包清单。2026-09-06 对该 digest 执行 docker run --rm --entrypoint dpkg-query luckfoxtech/luckfox_pico:1.0@sha256:915d44588085826cbeda4b969dbbe7d5e54bf779ba36cda3c5072ee9533e0417 -W（amd64，366 个包）：SDK 官方 apt 清单、wget/patch、ca-certificates、procps、vim/less/file、openssh-server 已在 FROM；sudo/curl/locales/iproute2/jq/tcpdump/htop/neofetch 不在。
+# apt 取舍只看当前 FROM digest 的 dpkg：不在 FROM 则显式安装，已在 FROM 则不写。该官方镜像没有公布与 digest 绑定的包清单。2026-09-06 对该 digest 执行 docker run --rm --entrypoint dpkg-query luckfoxtech/luckfox_pico:1.0@sha256:915d44588085826cbeda4b969dbbe7d5e54bf779ba36cda3c5072ee9533e0417 -W（amd64，366 个包）：SDK 官方 apt 清单、wget/patch、ca-certificates、procps、vim/less/file、openssh-server 已在 FROM；sudo/curl/locales/iproute2/jq/tcpdump/htop/neofetch/tree/iftop/iotop/screen/ncdu/traceroute/nmap/ngrep/conntrack/psmisc/fping/dmidecode 不在。
 # - sudo / curl / locales：FROM 没有。缺 curl 时 buildroot 镜像测速失败、主镜像站点为空、各包回落上游默认站点。
 # - iproute2 / jq / tcpdump：`ss`、JSON 摘要、V10 抓包；FROM 没有。procps 已在 FROM，不重复。
 # - htop / neofetch：排查 CLI。vim/less/file 已在 FROM，不重复。neofetch 在 jammy universe；本 RUN 带 --no-install-recommends，避免拉上 imagemagick 等推荐包。
+# - tree / iftop / iotop / screen / ncdu / traceroute / nmap / ngrep / conntrack / psmisc / fping / dmidecode：诊断 CLI。apt 写 conntrack（AlmaLinux 包名 conntrack-tools）；不写 conntrack-tools / conntrackd / iotop-c。nmap/ngrep/ncdu 等在 universe，与 neofetch 相同前提。
 # - 公开 Dockerfile 层不安装 openssh-server：FROM 已有；活动镜像路径由 .cursor/install.sh 写入私有 Build 快照，本备选不在公开层再装一遍。
 RUN apt-get update && apt-get install -y --no-install-recommends \
       sudo curl locales \
       htop neofetch \
       iproute2 jq tcpdump \
+      tree iftop iotop screen ncdu traceroute \
+      nmap ngrep conntrack psmisc fping dmidecode \
     && rm -rf /var/lib/apt/lists/*
 
 # Tailscale 使用官方 Ubuntu 22.04 Jammy stable apt 仓库，不锁定版本；节点认证只在 Agent Run 的 start 阶段进行。本层与 SDK/工具 RUN 一样带 --no-install-recommends。
