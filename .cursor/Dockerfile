@@ -41,6 +41,7 @@ ENV TZ=Asia/Shanghai
 # - sudo / curl / ca-certificates / locales：FROM 没有；curl 还被下一层拉 Tailscale 密钥使用。
 # - iproute2 / jq / tcpdump：`ss`、JSON 摘要、V10 抓包；FROM 没有。procps 已在 FROM，不重复。
 # - htop / neofetch：排查 CLI。neofetch 在 universe；本 RUN 带 --no-install-recommends，避免拉上 imagemagick 等推荐包。
+# - tree / iftop / iotop / screen / ncdu / traceroute / nmap / ngrep / conntrack / psmisc / fping / dmidecode：诊断 CLI。apt 写 conntrack（AlmaLinux 包名 conntrack-tools）；不写 conntrack-tools / conntrackd / iotop-c。nmap/ngrep/ncdu 等在 universe，与 neofetch 相同前提。
 # - 绝不写 which：which 无独立实体包（命令由 essential 包 debianutils 内置、FROM 已有）；ubuntu:24.04（universe 默认开启）上写它会解析到虚包 gnu-which 并安装成功（退出 0）、徒增冗余包，官方镜像 Ubuntu 22.04 上则报 "E: Unable to locate package which" 致退出码 100。
 # - 公开 Dockerfile 层不安装 openssh-server：FROM 也没有；server 由 .cursor/install.sh 写入私有 Build 快照，避免 host key 进入公开层。
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -52,6 +53,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       sudo ca-certificates locales \
       iproute2 jq tcpdump \
       htop neofetch \
+      tree iftop iotop screen ncdu traceroute \
+      nmap ngrep conntrack psmisc fping dmidecode \
     && rm -rf /var/lib/apt/lists/*
 
 # Tailscale 使用官方 Ubuntu 24.04 Noble stable apt 仓库，不锁定版本；节点认证只在 Agent Run 的 start 阶段进行。本层与 SDK/工具 RUN 一样带 --no-install-recommends。
