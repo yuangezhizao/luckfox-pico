@@ -148,6 +148,8 @@ jobs:
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
+      # 镜像末尾 USER ubuntu（Cloud Agent）；Actions 要求 job 容器为超级用户（官方文档写 root）。用 --user 0（数字 uid）覆盖，不用 --user root（按 passwd 名解析）。https://docs.github.com/en/actions/reference/workflows-and-actions/dockerfile-support#user
+      options: --user 0
     strategy:
       fail-fast: false
       matrix:
