@@ -1,11 +1,11 @@
 # Luckfox Pico Cloud Agent 平台安装与启动顺序设计规格（Design Spec）
 
 - **日期**：2026-09-18
-- **状态**：待 Review
+- **状态**：已 Review
 - **分支**：`cursor/platform-install-spec-8f0d`（起点 `origin/dev`）
 - **主题**：把 Cursor 平台在 Environment Build 与 Agent Run 中实际执行的命令层顺序写成活目录，并与仓库 Dockerfile / `install.sh` / `start.sh` 分层对齐
 - **关联代码文件**：不改运行时文件。分层上下文见 `.cursor/environment.json`、`.cursor/Dockerfile`、`.cursor/Dockerfile.luckfox_pico`、`.cursor/install.sh`、`.cursor/start.sh`
-- **关联计划**：Review 通过后编写 [`2026-09-18-luckfox-cloudagent-platform-install.md`](../plans/2026-09-18-luckfox-cloudagent-platform-install.md)
+- **关联计划**：[`2026-09-18-luckfox-cloudagent-platform-install.md`](../plans/2026-09-18-luckfox-cloudagent-platform-install.md)
 - **关联规格**：[`2026-07-13-luckfox-cloudagent-env-design.md`](2026-07-13-luckfox-cloudagent-env-design.md)、[`2026-08-30-luckfox-cloudagent-tailscale-design.md`](2026-08-30-luckfox-cloudagent-tailscale-design.md)、[`2026-09-14-luckfox-cloudagent-default-user-design.md`](2026-09-14-luckfox-cloudagent-default-user-design.md)、[`2026-09-16-luckfox-cloudagent-diagnostic-cli-design.md`](2026-09-16-luckfox-cloudagent-diagnostic-cli-design.md)
 
 ---
@@ -113,21 +113,71 @@ Environment Build：Docker 镜像 → 工作区 clone → 平台 install 命令 
 
 `desktop-init` 与 `start.sh` 并行于平台 start 阶段，不是互相的父进程：`desktop-init.sh` 与 `tailscaled` / `sshd` 的 PPID 均为 `tini`。
 
-### 3.4 脚本与产物路径
+### 3.4 `/opt/cursor/` 树与职责
 
-| 路径 | 来源 | 角色 |
+平台桌面工具包与 artifacts 根在 `/opt/cursor/`。复现：`tree /opt/cursor`（不加 `-a`）。现行 snapshot（`bld-20260916-1810ec4f-…`）输出 10 directories、18 files：
+
+```
+/opt/cursor
+├── artifacts -> /cursor/stores/self/artifacts
+├── cloud-agent-tools
+│   ├── c06a0611e1e6a422d86412295478c5681504707a103c16b3b20ef457374da371
+│   │   ├── cloud-agent-assets.tsv
+│   │   ├── cloud-agent-setup
+│   │   ├── cloud-agent-tools.tsv
+│   │   └── files
+│   │       ├── anyos
+│   │       │   ├── anyos-setup.sh
+│   │       │   └── anyos.conf
+│   │       └── vnc
+│   │           ├── capture-vnc-user-env.sh
+│   │           ├── configure-google-chrome.sh
+│   │           ├── configure_os_display.sh
+│   │           ├── desktop-init.sh
+│   │           ├── install-cursor-artifact-directories.sh
+│   │           ├── install-fonts-and-fontconfig.sh
+│   │           ├── install-google-chrome.sh
+│   │           ├── install-locales.sh
+│   │           ├── install-remote-vnc-setup.sh
+│   │           ├── install-vnc-desktop-apt-packages.sh
+│   │           ├── install_and_configure_themes.sh
+│   │           └── vnc-desktop.Aptfile
+│   ├── current -> /opt/cursor/cloud-agent-tools/c06a0611e1e6a422d86412295478c5681504707a103c16b3b20ef457374da371
+│   └── current.bundle-hash
+├── logs
+└── recording-staging
+```
+
+`current` 与 `current.bundle-hash` 都指向同一内容寻址目录名 `c06a0611…`。`install-cloud-agent-assets` 按 `cloud-agent-tools.tsv`（14 行）把捆绑文件装到 `/usr/local` 或 `/tmp`，源文件仍留在本树。`tree` 默认不列出点目录；另有 `/opt/cursor/.exec-daemon/`（exec-daemon 请求上下文缓存，不是安装脚本，不展开文件正文）。
+
+| 路径 | 用途 | 运行时副本 / 备注 |
 | --- | --- | --- |
-| `/opt/cursor/cloud-agent-tools/current/cloud-agent-setup` | 平台工具包 | 分发器 |
-| `…/files/vnc/vnc-desktop.Aptfile` | 捆绑 | Aptfile 源；运行时 `/usr/local/share/vnc-desktop.Aptfile` |
-| `…/files/vnc/*.sh` | 捆绑 | `run-step` 对应脚本源 |
-| `/usr/local/bin/install-vnc-desktop-apt-packages` 等 | 运行时副本 | 分发器步骤可执行文件 |
-| `/usr/local/share/desktop-init.sh` | 捆绑哈希同上 | Run 桌面入口 |
-| `/tmp/capture-vnc-user-env` | 捆绑 | Build 捕获用户环境 |
-| `/home/ubuntu/.cursor/bin/cursor-git-ssh-keygen` | `configure-git` 残留 | `gpg.ssh.program`；经 `/run/host-services/ssh-auth.sock` 调 `ssh-keygen` |
-| `/usr/local/bin/gh` | `link-gh-to-usr-local-bin` | 指向 `/exec-daemon/gh` |
-| `/usr/local/bin/cursor-agent-store-fuse` | `install-agent-store-fuse` | Run 挂载二进制 |
+| `/opt/cursor/artifacts` | Agent 产物目录 | Run 上软链到 `/cursor/stores/self/artifacts`（fuse） |
+| `/opt/cursor/logs` | 平台日志目录 | 现行空 |
+| `/opt/cursor/recording-staging` | 录像暂存 | `install-cursor-artifact-directories` 创建，mode 777；现行空 |
+| `cloud-agent-tools/current` | 现行工具包 | 软链到内容寻址目录 |
+| `current.bundle-hash` | 现行捆绑哈希 | 与目录名相同 |
+| `cloud-agent-setup` | Build 分发器 | `sync-assets` / `run-step` / `wrap-vnc-step` |
+| `cloud-agent-tools.tsv` | 捆绑工具清单 | 源路径与安装目标（base64） |
+| `cloud-agent-assets.tsv` | 远程资产清单 | 31 行；字体、图标、WhiteSur、noVNC/websockify zip 等，由 `sync-assets` 下载 |
+| `files/anyos/anyos.conf` | 桌面分辨率 / DPI / 字体 | `/usr/local/share/anyos.conf`；现行 1920×1200 @ 96 DPI |
+| `files/anyos/anyos-setup.sh` | 把 conf 套进 XFCE/GTK/Plank 模板 | `/usr/local/bin/anyos-setup`；**不在** `run-step` case |
+| `files/vnc/vnc-desktop.Aptfile` | 58 包清单（§4） | `/usr/local/share/vnc-desktop.Aptfile` |
+| `files/vnc/capture-vnc-user-env.sh` | 记录 VNC 用户名与 `HOME` | `/tmp/capture-vnc-user-env` → `/tmp/vnc-desktop-user-env` |
+| `files/vnc/install-vnc-desktop-apt-packages.sh` | 按 Aptfile `apt-get install --no-install-recommends` | `/usr/local/bin/install-vnc-desktop-apt-packages` |
+| `files/vnc/install-google-chrome.sh` | 加 Google apt 源并装 `google-chrome-stable` | `/usr/local/bin/install-google-chrome`；Chrome 不在 Aptfile |
+| `files/vnc/configure-google-chrome.sh` | 写用户 Chrome 配置与 `.desktop` 启动参数（软件 GL、无沙箱） | `/usr/local/bin/configure-google-chrome` |
+| `files/vnc/install-locales.sh` | 启用并 `locale-gen en_US.UTF-8` | `/usr/local/bin/install-locales` |
+| `files/vnc/install-fonts-and-fontconfig.sh` | 安装捆绑 Cascadia 等并写 fontconfig | `/usr/local/bin/install-fonts-and-fontconfig` |
+| `files/vnc/install_and_configure_themes.sh` | 解压 WhiteSur GTK/图标/光标 | `/usr/local/bin/install-and-configure-themes` |
+| `files/vnc/install-remote-vnc-setup.sh` | 解压捆绑 noVNC 1.2.0 与 websockify 0.10.0 | `/usr/local/bin/install-remote-vnc-setup` |
+| `files/vnc/configure_os_display.sh` | 按 `anyos.conf` 写 XFCE/终端/GTK 显示配置 | `/usr/local/bin/configure-os-display` |
+| `files/vnc/install-cursor-artifact-directories.sh` | 创建 `/opt/cursor`、`artifacts`、`recording-staging` | `/usr/local/bin/install-cursor-artifact-directories` |
+| `files/vnc/desktop-init.sh` | Run 桌面入口（§2.4） | `/usr/local/share/desktop-init.sh` |
 
-`cloud-agent-setup run-step` 已知步骤：`capture-vnc-user-env`、`install-vnc-desktop-apt-packages`、`install-google-chrome`、`configure-google-chrome`、`install-locales`、`cleanup-vnc-desktop-apt`、`install-fonts-and-fontconfig`、`install-and-configure-themes`、`install-remote-vnc-setup`、`configure-os-display`、`install-cursor-artifact-directories`。
+`cloud-agent-setup run-step` 已知步骤：`capture-vnc-user-env`、`install-vnc-desktop-apt-packages`、`install-google-chrome`、`configure-google-chrome`、`install-locales`、`cleanup-vnc-desktop-apt`、`install-fonts-and-fontconfig`、`install-and-configure-themes`、`install-remote-vnc-setup`、`configure-os-display`、`install-cursor-artifact-directories`。`cleanup-vnc-desktop-apt` 在分发器内联，无独立捆绑脚本。
+
+不在本树、由控制器注入的可见产物：`/home/ubuntu/.cursor/bin/cursor-git-ssh-keygen`（`gpg.ssh.program`）、`/usr/local/bin/gh` → `/exec-daemon/gh`、`/usr/local/bin/cursor-agent-store-fuse`。
 
 ---
 
@@ -177,11 +227,11 @@ Environment Build：Docker 镜像 → 工作区 clone → 平台 install 命令 
 
 ## 6. 验证策略
 
-本规格是文档。V1–V4 在写 spec 时用当前 Agent 与 09-16 Build 日志核对；V5 在 plan 落地指针后做。
+本规格是文档。V1–V4 用当前 Agent 与 09-16 Build 日志核对；V5 在 plan 落地指针后做。
 
 | 步骤 | 通过标准 |
 | --- | --- |
-| V1 | 本文件路径存在，状态为待 Review，关联计划尚未写成正文 |
+| V1 | 本文件路径存在，状态为已 Review，关联计划已写成正文 |
 | V2 | 相对本功能起点，`.cursor/Dockerfile*`、`AGENTS.md`、`environment.json`、`install.sh`、`start.sh` 无 diff |
 | V3 | Aptfile sha256 与 58 个名字与 §4 一致 |
 | V4 | 09-16 Build 日志的 `[INSTALL] Command:` 顺序与 §3.2 命令名一致 |
@@ -219,4 +269,4 @@ Environment Build：Docker 镜像 → 工作区 clone → 平台 install 命令 
 
 ## 9. 后续
 
-Review 通过后按 F3/F4 编写 [`2026-09-18-luckfox-cloudagent-platform-install.md`](../plans/2026-09-18-luckfox-cloudagent-platform-install.md)。
+实现步骤与指针落地见 [`2026-09-18-luckfox-cloudagent-platform-install.md`](../plans/2026-09-18-luckfox-cloudagent-platform-install.md)。
