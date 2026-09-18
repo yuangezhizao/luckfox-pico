@@ -207,7 +207,7 @@ Expected: Mac 路由经 Tailscale utun 且请求成功；同一请求在目标 A
 
 ## Environment Build install 流水
 
-来源 draft Build [`bld-20260906-a344b2e4-98f2-411d-86fa-d45b6dfa20cb`](https://cursor.com/dashboard/cloud-agents/builds/bld-20260906-a344b2e4-98f2-411d-86fa-d45b6dfa20cb)（UTC 2026-09-06 16:36–16:47，墙钟约 674s / 11min14s，commit `d5445d17`，全部退出码 0）。设计分层见 Spec §2.3；本表只记录该次 Build 日志里实际发生的顺序、耗时与磁盘增量。覆盖 Docker 镜像 + 平台 install + 用户 `install.sh` + snapshot，**不含** `start.sh`（Tailscale / sshd 在 Agent Run 才跑）。
+现行 Environment Build / Agent Run 命令层见 [`2026-09-18-luckfox-cloudagent-platform-install-design.md`](../specs/2026-09-18-luckfox-cloudagent-platform-install-design.md)。本表冻结为 2026-09-06 该次 Build 的墙钟与磁盘增量，不随后来 Build 改写。来源 draft Build [`bld-20260906-a344b2e4-98f2-411d-86fa-d45b6dfa20cb`](https://cursor.com/dashboard/cloud-agents/builds/bld-20260906-a344b2e4-98f2-411d-86fa-d45b6dfa20cb)（UTC 2026-09-06 16:36–16:47，墙钟约 674s / 11min14s，commit `d5445d17`，全部退出码 0）。设计分层见 Spec §2.3；本表只记录该次 Build 日志里实际发生的顺序、耗时与磁盘增量。覆盖 Docker 镜像 + 平台 install + 用户 `install.sh` + snapshot，**不含** `start.sh`（Tailscale / sshd 在 Agent Run 才跑）。
 
 ```mermaid
 flowchart TD
