@@ -1,0 +1,25 @@
+[2026-08-21T08:44:47.276811+00:00] startup: base_url=https://chatgpt.com/backend-api path_style=wham
+[2026-08-21T08:44:47.279715+00:00] auth: mode=ChatGPT account_id=8fbf53dc-50ab-429d-bf45-f1e80ee250d9
+[2026-08-21T08:44:47.279878+00:00] auth: set ChatGPT-Account-Id header: 8fbf53dc-50ab-429d-bf45-f1e80ee250d9
+[2026-08-21T08:44:49.794392+00:00] http.list_tasks: env=<all> limit=20 cursor_in=<none> cursor_out=<none> items=1
+[2026-08-21T08:44:59.534605+00:00] startup: base_url=https://chatgpt.com/backend-api path_style=wham
+[2026-08-21T08:44:59.534822+00:00] auth: mode=ChatGPT account_id=8fbf53dc-50ab-429d-bf45-f1e80ee250d9
+[2026-08-21T08:44:59.534982+00:00] auth: set ChatGPT-Account-Id header: 8fbf53dc-50ab-429d-bf45-f1e80ee250d9
+[2026-08-21T08:44:59.546480+00:00] startup: wham_force_internal=false ua=codex_cli_rs/0.149.0 (Mac OS 26.5.2; arm64) WarpTerminal/v0.2026.08.19.08.15.stable_01 (codex_cloud_tasks_tui)
+[[2026-08-21T08:44:59.570398+00:002026-08-21T08:44:59.570375+00:00] env: parsed HTTP GitHub origin => yuangezhizao/luckfox-pico] 
+env: git origins: ["https://github.com/yuangezhizao/luckfox-pico.git"]
+[2026-08-21T08:44:59.572365+00:00] env: parsed HTTP GitHub origin => yuangezhizao/luckfox-pico
+[2026-08-21T08:44:59.573750+00:00] env: GET https://chatgpt.com/backend-api/wham/environments/by-repo/github/yuangezhizao/luckfox-pico
+[2026-08-21T08:45:01.254143+00:00] http.list_tasks: env=<all> limit=20 cursor_in=<none> cursor_out=<none> items=1
+[2026-08-21T08:45:01.254969+00:00] refresh.apply: env=<all> count=1
+[2026-08-21T08:45:02.094220+00:00] env: status=200 OK content-type=application/json
+[2026-08-21T08:45:02.518328+00:00] env: status=200 OK content-type=application/json
+[2026-08-21T08:45:02.521143+00:00] env: by-repo returned 1 env(s) for yuangezhizao/luckfox-pico
+[2026-08-21T08:45:02.521514+00:00] env: single environment available; selecting it
+[2026-08-21T08:45:02.522426+00:00] env.select: autodetected id=6a848388ad9c81918de55ed554b8defa label=yuangezhizao/luckfox-pico
+[2026-08-21T08:45:02.539089+00:00] env: parsed HTTP GitHub origin => yuangezhizao/luckfox-pico
+[2026-08-21T08:45:03.272407+00:00] http.list_tasks: env=6a848388ad9c81918de55ed554b8defa limit=20 cursor_in=<none> cursor_out=<none> items=1
+[2026-08-21T08:45:03.273265+00:00] refresh.apply: env=6a848388ad9c81918de55ed554b8defa count=1
+[2026-08-21T08:45:04.707389+00:00] env: status=200 OK content-type=application/json
+[2026-08-21T08:45:21.821487+00:00] env: status=200 OK content-type=application/json
+[2026-08-21T08:45:25.933576+00:00] env: status=200 OK content-type=application/json
