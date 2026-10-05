@@ -92,7 +92,7 @@ sudoers 维持既有 `ubuntu ALL=(ALL) NOPASSWD:ALL`（`visudo -cf` 校验的 `/
 
 | 进程 | 作用 | 谁拉起 |
 | --- | --- | --- |
-| `tini`（PID 1） | 容器 init，再 exec pod-daemon | 平台 |
+| `tini`（PID 1） | 容器 init，启动并管理子进程 pod-daemon | 平台 |
 | `pod-daemon` | Pod 控制面（SSH auth sock、API sock） | tini |
 | `tailscaled` | Tailscale kernel 模式（1054 HTTP / 1055 SOCKS5） | `start.sh`（sudo 后的 root） |
 | `sshd` | OpenSSH 监听 `:22`（无已登录会话时没有 priv/net 子进程） | 同上 |

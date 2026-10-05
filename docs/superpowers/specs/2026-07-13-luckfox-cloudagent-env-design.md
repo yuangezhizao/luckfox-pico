@@ -38,7 +38,7 @@ luckfox-pico 是 Rockchip RV1103/RV1106 的嵌入式 Linux 交叉编译 SDK，�
 Cursor Cloud Agent 支持两种环境定义方式：
 
 - **快照（snapshot）**：手工在一台交互式 VM 里安装依赖，再「拍快照」。缺点是不可审计、难复现、易漂移。
-- **Dockerfile 模式**：在 `.cursor/environment.json` 里声明 `build.dockerfile`，由 Cursor 在每次启动时从 Dockerfile 构建镜像。优点是环境定义进版本库、可 diff、可回滚、跨人一致。
+- **Dockerfile 模式**：在 `.cursor/environment.json` 里声明 `build.dockerfile`，由 Cursor 在 Environment Build 时从 Dockerfile 构建镜像，Agent 再从 Build 生成的快照启动。优点是环境定义进版本库、可 diff、可回滚、跨人一致。
 
 本设计**明确选择 Dockerfile 模式**，把环境定义写死在仓库中。
 
@@ -297,6 +297,7 @@ buildroot **2023.02.6** 由随仓库跟踪的源码包 `sysdrv/tools/board/build
 | `.cursor/environment.json` | Cloud Agent 环境定义 | Dockerfile 模式负责编译依赖；`install` 为 `sudo -n -E bash .cursor/install.sh`（grilling 下载见 §4.1 与 [`2026-09-14` §2.6](2026-09-14-luckfox-cloudagent-default-user-design.md)；`openssh-server` 进私有 Build 快照，无 stamp 时旋转 host key，约束见 [`2026-08-30` §2.3–§2.4](2026-08-30-luckfox-cloudagent-tailscale-design.md)）；成功的非草稿 Build 捕获磁盘状态并自动成为 active Build；草稿 Build 仅用于验证，须显式激活后才成为 active Build，后续 Agent 从该 Build 启动；safe.directory 仍由 Dockerfile 的 `--system` 处理 |
 | `.cursor/Dockerfile` | **当前活动**环境（自建 Ubuntu 24.04，environment.json 引用本文件） | `FROM ubuntu:24.04@sha256:4fbb8e6a…` + 官方 apt 清单 + `wget patch bzip2 xz-utils perl gzip tar findutils sed` + `curl` + `sudo`/`ca-certificates`/`locales` + git safe.directory（**不含 which**）；附「平台自动安装包」注释框 |
 | `.cursor/Dockerfile.luckfox_pico` | 备选环境（官方镜像 Ubuntu 22.04，官方支持） | `FROM luckfoxtech/luckfox_pico:1.0@sha256:915d4458…`（tag+digest 双锁定）+ 补 `sudo curl vim less file htop` + `git config --system --add safe.directory '*'`；附「平台自动安装包」注释框 |
+| 平台自动安装（Cursor） | 不写入本仓 | 平台在 Build / Run 中的步骤、与本仓配置的衔接、软件包来源和 `/opt/cursor/` 目录见 [`2026-09-18-luckfox-cloudagent-platform-install-design.md`](2026-09-18-luckfox-cloudagent-platform-install-design.md)；08-30 plan「Environment Build install 流水」是 2026-09-06 那次 Build 的历史记录 |
 | `AGENTS.md` | 给 Agent 的仓库说明（精简） | 中文交互约定、仓库性质（验证=产出固件镜像、无长期服务、luckfox≠ESP-IDF）、活动 / 备选环境、工具链内置、非交互选板、构建 / 验证命令、编译污染提醒；编译实测数据见本 spec §7 |
 
 > 关键 digest 记录：官方镜像 `sha256:915d44588085826cbeda4b969dbbe7d5e54bf779ba36cda3c5072ee9533e0417`；自建基底 `ubuntu:24.04` `sha256:4fbb8e6a8395de5a7550b33509421a2bafbc0aab6c06ba2cef9ebffbc7092d90`。

@@ -19,7 +19,7 @@
 - **备选 = 官方镜像**（`.cursor/Dockerfile.luckfox_pico`：`FROM luckfoxtech/luckfox_pico:1.0`，Ubuntu 22.04，依赖预装、官方支持）：追求官方支持或规避 24.04 兼容风险时，把 `environment.json` 的 `dockerfile` 改指向它即可。该备选同样安装浮动稳定版 Tailscale（Jammy 仓库）与 `ubuntu` 免密 sudo；公开层不安装 `openssh-server`（官方 FROM 已含），由共享 `install.sh` 装包（已装则跳过）并在无 `/etc/ssh/.cursor-hostkeys-generated` 时旋转 host key 写入私有 Build 快照。
 - ARM 交叉工具链 `arm-rockchip830-linux-uclibcgnueabihf`（gcc 8.3.0）**已随仓库内置**于 `tools/linux/toolchain/`，`build.sh` 选板后自动加入 `PATH`，**无需安装**。
 - **Buildroot 下载包 `dl/` 不随仓库分发**：`sysdrv/source/buildroot` 已被 gitignore（`build.sh clean` 亦整目录删除），故**全新 / clean 后**构建 rootfs 需联网下载全部 buildroot 包（Pico Max 约 105 个 / Ultra W 约 153 个，含 mpv/madplay/sdl2 等多媒体包）；仅 in-tree 的 uboot / kernel 可离线（见下）。
-- 桌面 / VNC / 字体等由 Cursor 平台启动时按 `/usr/local/share/vnc-desktop.Aptfile` 自动安装（本仓纯交叉编译、用不上，但平台仍会装）；**无需 docker-in-docker**——环境本身就是容器，禁止把 Docker 引擎写入本仓 Dockerfile。若当前 VM 没有 `docker` CLI、又要对锁定 digest 做 `docker run … dpkg-query` 或在 Agent 内验证官方镜像路径，按 [`docs/superpowers/specs/2026-07-13-luckfox-cloudagent-env-design.md`](docs/superpowers/specs/2026-07-13-luckfox-cloudagent-env-design.md) §2.3 在本机临时安装嵌套 Docker。
+- 桌面 / VNC / 字体等由 Cursor 平台在 Environment Build 阶段按 `/usr/local/share/vnc-desktop.Aptfile` 装入快照，Agent Run 时只启动桌面服务（本仓纯交叉编译、用不上，但平台仍会装）；**无需 docker-in-docker**——环境本身就是容器，禁止把 Docker 引擎写入本仓 Dockerfile。若当前 VM 没有 `docker` CLI、又要对锁定 digest 做 `docker run … dpkg-query` 或在 Agent 内验证官方镜像路径，按 [`docs/superpowers/specs/2026-07-13-luckfox-cloudagent-env-design.md`](docs/superpowers/specs/2026-07-13-luckfox-cloudagent-env-design.md) §2.3 在本机临时安装嵌套 Docker。
 
 ### 选板（非交互）
 
