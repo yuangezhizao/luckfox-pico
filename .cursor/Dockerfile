@@ -17,8 +17,9 @@ ARG DEBIAN_FRONTEND=noninteractive
 ENV TZ=Asia/Shanghai
 
 # ┌─ 平台会「自动安装」的包 ───────────────────────────────────────────────────
-# │ Cursor 每次启动都会跑桌面初始化，按容器内 /usr/local/share/vnc-desktop.Aptfile
-# │ 用 `apt-get install --no-install-recommends` 安装下列（实测 sha256=819987b7…，与本仓 2026-09-06 环境一致）：
+# │ Cursor 在 Environment Build 阶段按容器内 /usr/local/share/vnc-desktop.Aptfile，
+# │ 以 `apt-get install --no-install-recommends` 安装下列包；Agent Run 时 desktop-init.sh 只负责启动桌面。
+# │ 2026-10-05 在当前活动环境复核：sha256=819987b7…，58 个包名与下列清单一致。
 # │   VNC     : tigervnc-standalone-server tigervnc-common tigervnc-tools
 # │   XFCE    : xfce4 xfce4-terminal xfce4-settings thunar
 # │   X11     : x11-utils x11-xserver-utils xdg-utils xdotool xclip procps
@@ -31,8 +32,9 @@ ENV TZ=Asia/Shanghai
 # │   Python  : python3-minimal python3-numpy
 # │   资产依赖: bash ca-certificates coreutils curl findutils gzip tar
 # │   浏览器  : google-chrome-stable（单独脚本 install-google-chrome 安装）
-# │ 另外平台还会：把 gh 软链到 /usr/local/bin/gh、配置 git 身份与 SSH 提交签名、每次启动 git clean -fd 并重建 /opt/cursor/artifacts。
-# │ ⚠️ 本仓是纯交叉编译 SDK、不用桌面 computer use，但平台仍会装上述包。下列只作 Cloud Agent 运行时记录，不作为本文件 apt 取舍依据。
+# │ 平台 Build 步骤还会配置 git 身份与 SSH 提交签名（含 git-cleanup 子步骤）、把 gh 软链到 /usr/local/bin/gh、创建 /opt/cursor/artifacts；
+# │ Agent Run 启动时 artifacts 被替换为指向 /cursor/stores/self/artifacts 的链接。
+# │ ⚠️ 本仓是纯交叉编译 SDK、不用桌面 computer use，但平台仍会装上述包。该清单只作 Cloud Agent 环境记录，不作为本文件 apt 取舍依据。
 # └──────────────────────────────────────────────────────────────────────────────
 
 # apt 取舍只看当前 FROM digest 的 dpkg：不在 FROM 则显式安装，已在 FROM 则不写。Ubuntu/Luckfox 都没有与 digest 绑定的默认包文档。2026-09-06 对该 digest 执行 docker run --rm --entrypoint dpkg-query ubuntu:24.04@sha256:4fbb8e6a8395de5a7550b33509421a2bafbc0aab6c06ba2cef9ebffbc7092d90 -W（amd64，92 个包）：有 passwd/gzip/tar/findutils/sed/procps，无下列包。
