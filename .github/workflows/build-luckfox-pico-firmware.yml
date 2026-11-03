@@ -8,7 +8,7 @@ on:
         type: boolean
         default: false
   schedule:
-    # 北京每月 1 日 08:00（UTC 00:00）自动强制重建 CI 镜像以吸收 apt 安全更新；仅重建镜像、跳过固件编译
+    # 北京每月 1 日 08:00（UTC 00:00）自动强制重建 CI 镜像以吸收 apt 安全更新，并用新镜像编译 3 组合固件
     - cron: '0 0 1 * *'
   push:
     branches:
@@ -56,6 +56,8 @@ jobs:
           # schedule（月度）或手动 force_rebuild 时强制重建，吸收 Dockerfile apt 包的安全更新
           FORCE_REBUILD: ${{ github.event_name == 'schedule' || inputs.force_rebuild == true }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}   # gh attestation verify 需
+          EVENT_NAME: ${{ github.event_name }}    # 经 env 传入，避免分支名等直接插入脚本
+          REF_NAME: ${{ github.ref_name }}
         run: |
           set -euo pipefail
           # 断言 digest 合法（sha256:<64hex>），否则 fail loud——防 jq 缺键返回字面量 null 静默下传（见 spec §7 R10）
@@ -73,6 +75,7 @@ jobs:
             # 绝不再按 mutable tag 二次 inspect——消除 push→inspect 之间被重指 tag 的 TOCTOU（见 spec §7 R10）
             docker buildx build --no-cache --push -f .cursor/Dockerfile -t "${IMAGE_REF}:${TAG}" --metadata-file /tmp/bx-meta.json .cursor
             REBUILT=true
+            SOURCE="强制重建（--no-cache）"
             DIGEST=$(jq -er '."containerimage.digest" // empty' /tmp/bx-meta.json) \
               || { echo "❌ force_rebuild: buildx metadata 缺 containerimage.digest——中止（fail loud）"; exit 1; }
             assert_digest "force_rebuild" "${DIGEST}"
@@ -91,6 +94,7 @@ jobs:
                   --source-ref refs/heads/dev \
                   --signer-workflow "${{ github.repository }}/.github/workflows/build-luckfox-pico-firmware.yml@refs/heads/dev" \
                   --bundle-from-oci --format json 2>&1); then
+              SOURCE="复用（provenance 验证通过）"
               echo "✅ provenance 验证通过（signer/source=dev），复用（被验证的 digest 即下游所用）；验证详情："
               echo "${OUT}" | jq '.[].verificationResult' 2>/dev/null || echo "${OUT}"
             else
@@ -111,6 +115,7 @@ jobs:
             # 同上：一步 build+push + metadata digest，消除 push→inspect 的 TOCTOU
             docker buildx build --push -f .cursor/Dockerfile -t "${IMAGE_REF}:${TAG}" --metadata-file /tmp/bx-meta.json .cursor
             REBUILT=true
+            SOURCE="首建（tag 不存在或 inspect 失败）"
             DIGEST=$(jq -er '."containerimage.digest" // empty' /tmp/bx-meta.json) \
               || { echo "❌ 首建: buildx metadata 缺 containerimage.digest——中止（fail loud）"; exit 1; }
             assert_digest "首建" "${DIGEST}"
@@ -122,6 +127,17 @@ jobs:
             echo "digest=${DIGEST}"
             echo "rebuilt=${REBUILT}"
           } >> "$GITHUB_OUTPUT"
+          # 写入 run 摘要页，便于从固件 artifact 所在 run 追溯编译用的镜像
+          {
+            echo "### 🐳 CI 镜像"
+            echo ""
+            echo "| 项 | 值 |"
+            echo "| --- | --- |"
+            echo "| 触发事件 | \`${EVENT_NAME}\` |"
+            echo "| 分支 | \`${REF_NAME}\` |"
+            echo "| 镜像来源 | ${SOURCE} |"
+            echo "| 镜像 | \`${IMAGE_REF}@${DIGEST}\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: 🔏 生成 build provenance attestation（仅新建镜像时；复用镜像的 provenance 已在上步验证）
         if: steps.build.outputs.rebuilt == 'true'
@@ -134,8 +150,7 @@ jobs:
   build-firmware:
     name: 🛠️ ${{ matrix.title }}
     needs: build-image
-    # schedule（月度）只重建 CI 镜像、跳过固件编译；push(dev)/workflow_dispatch 才跑完整 3 组合
-    if: github.event_name != 'schedule'
+    # schedule（月度）、push(dev)、workflow_dispatch 都编译 3 组合；schedule 用同一 run 刚重建的镜像，当月即验证新镜像
     runs-on: ${{ matrix.os }}
     timeout-minutes: 120
     permissions:
