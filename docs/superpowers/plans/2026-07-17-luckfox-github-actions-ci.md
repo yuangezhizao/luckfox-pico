@@ -20,7 +20,7 @@
 - 交付代码改动：`.github/workflows/build-luckfox-pico-firmware.yml`（新建）、`.cursor/Dockerfile`（改：移除 host sshd）、删除孤立 gitlink `sysdrv/tools/board/ubuntu`。
 - 矩阵 3 组合（均 Buildroot）：Pico Max/SD_CARD（`lunch` = `4␊0␊0`）、Pico Max/SPI_NAND（`4␊1␊0`）、Ultra W/EMMC（`5␊0␊0`）。
 - 运行环境：`.cursor/Dockerfile`（`FROM ubuntu:24.04@sha256:4fbb8e6a8395de5a7550b33509421a2bafbc0aab6c06ba2cef9ebffbc7092d90`，无 `COPY`）→ build+push `ghcr.io/<小写owner>/luckfox-pico-ci:<Dockerfile内容hash>` → `container:` 按 **digest**（`ghcr.io/<小写owner>/luckfox-pico-ci@sha256:…`）引用 + `credentials`（`github.actor` + `GITHUB_TOKEN`）拉镜像（兼容 public/private，包当前 public）。
-- 触发：`workflow_dispatch` + `push(dev)` + `schedule`（每月 1 日 UTC 00:00 强制重建 CI 镜像、仅重建镜像不编译固件，见 spec §4.2）+ `paths-ignore`（纯文档）；feature 分支首测用**临时 bootstrap**（把本分支临时加入 `push.branches`，注册/见分晓后移除）。
+- 触发：`workflow_dispatch` + `push(dev)` + `schedule`（每月 1 日 UTC 00:00 强制重建 CI 镜像、仅重建镜像不编译固件，见 spec §4.2〔2026-11-03 修订：schedule 也编译固件，见 [2026-11-03 spec](../specs/2026-11-03-luckfox-github-actions-schedule-firmware-design.md)〕）+ `paths-ignore`（纯文档）；feature 分支首测用**临时 bootstrap**（把本分支临时加入 `push.branches`，注册/见分晓后移除）。
 - 权限**按 job 最小化**：`build-image` = `{contents: read, packages: write, id-token: write, attestations: write}`（后二者供 `actions/attest` 生成/上传 build provenance）；`build-firmware` = `{contents: read, packages: read}`。
 - 矩阵 `fail-fast: false`；`build-firmware` `timeout-minutes: 120`、`build-image` `timeout-minutes: 30`。
 - 缓存：`BR2_DL_DIR=$GITHUB_WORKSPACE/.br-dl`（容器内挂载卷、buildroot **树外**，经 `GITHUB_ENV` 设置）；`actions/cache` `path: .br-dl`（相对 `GITHUB_WORKSPACE`、与前者同指）、key = `br-dl-buildroot-2023.02.6-<defconfig名>-<defconfig内容hash>` + `restore-keys` 同 defconfig 前缀回退。defconfig 映射：Pico Max（SD_CARD/SPI_NAND）→ `luckfox_pico_defconfig`；Ultra W（EMMC）→ `luckfox_pico_w_defconfig`。
@@ -844,7 +844,7 @@ jobs:
 
 - **触发**：新增 `workflow_dispatch` 的 `force_rebuild` boolean input（手动按需）+ `schedule: '0 0 1 * *'`（北京每月 1 日 08:00 = UTC 00:00，自动兜底）。
 - **build-image**：`FORCE_REBUILD = (github.event_name=='schedule') || (inputs.force_rebuild==true)`；为真时跳过「已存在则复用」、用 buildx 无缓存重建、推送并从构建 metadata 取不可变 digest（重跑 apt、覆盖同 tag；旧 digest 变未标记 package version、按需清理即可）。
-- **build-firmware**：`if: github.event_name != 'schedule'`——schedule 只重建镜像、跳过 3 组合固件（每月约 3min）；push(dev)/dispatch 仍跑完整。
+- **build-firmware**：`if: github.event_name != 'schedule'`——schedule 只重建镜像、跳过 3 组合固件（每月约 3min）；push(dev)/dispatch 仍跑完整。〔2026-11-03 修订：删除该门禁，schedule 也编译 3 组合，见 [2026-11-03 spec](../specs/2026-11-03-luckfox-github-actions-schedule-firmware-design.md)〕
 - **base image**：保留 `FROM …@sha256` digest pin（供应链不可变、可审计）；不加 `--pull`（对 pin digest 无实际作用）、不引入 Dependabot（避免每月约 1 条 bump digest 的提交噪音）；base 底层需要时手动 bump digest（低频、经 PR）。
 - **关键澄清**：buildroot 2023.02.6 由 Luckfox SDK 固定、**不在 CI 镜像内**（`build.sh` 编译时下载源码 tarball），不属本机制；本机制只更新 Dockerfile 显式安装的 host 编译工具的安全补丁。
 
